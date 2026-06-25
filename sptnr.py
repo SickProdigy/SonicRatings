@@ -144,8 +144,10 @@ def get_lock_timestamp(lock_entry):
 # Store enough context in the lock file to identify what was updated. That makes
 # long interrupted runs easier to inspect without changing the lock behavior.
 def record_lock(track_id, artist_name, album, track_name):
+    updated_at = time.time()
     LOCK[track_id] = {
-        "updated_at": time.time(),
+        "updated_at": updated_at,
+        "expires_at": updated_at + get_lock_expiry(track_id, updated_at),
         "artist_name": artist_name,
         "album": album,
         "track_name": track_name,
@@ -153,21 +155,26 @@ def record_lock(track_id, artist_name, album, track_name):
     save_lock(LOCK)
 
 def should_update(song_id):
-    lock_expiry_seconds = get_lock_expiry()
+    lock_entry = LOCK.get(song_id)
+    lock_expiry_seconds = get_lock_expiry(song_id, get_lock_timestamp(lock_entry))
     if lock_expiry_seconds == 0:
         return True
-    last_update_ts = get_lock_timestamp(LOCK.get(song_id))
+    last_update_ts = get_lock_timestamp(lock_entry)
     if not last_update_ts:
         return True
+    if isinstance(lock_entry, dict) and lock_entry.get("expires_at"):
+        return time.time() > lock_entry["expires_at"]
     return (time.time() - last_update_ts) > lock_expiry_seconds
 
 
-def get_lock_expiry():
+def get_lock_expiry(song_id=None, updated_at=None):
     if (BASE_LOCK_DURATION == 0):
         return 0  # No lock duration, force update every time
 
     base_expiry = timedelta(days=BASE_LOCK_DURATION)
-    jitter = timedelta(hours=random.uniform(-LOCK_JITTER/2, LOCK_JITTER/2))
+    stable_seed = f"{song_id}:{int(updated_at or 0)}:{BASE_LOCK_DURATION}:{LOCK_JITTER}"
+    jitter_rng = random.Random(stable_seed)
+    jitter = timedelta(hours=jitter_rng.uniform(-LOCK_JITTER/2, LOCK_JITTER/2))
     expiry = base_expiry + jitter
     # Ensure expiry is at least 1 day
     expiry = max(expiry, timedelta(days=1))
