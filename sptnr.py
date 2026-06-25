@@ -931,14 +931,6 @@ def process_track(track_id, artist_name, album, track_name):
         UNMATCHED_TRACKS.append(f"{artist_name} - {album} - {track_name}")
         NOT_FOUND += 1
 
-        if PREVIEW != 1:
-            try:
-                nav_url = f"{NAV_BASE_URL}/rest/setRating?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=myapp&id={track_id}&rating=0"
-                navidrome_get(nav_url, f"updating rating for {track_id}")
-                record_lock(track_id, artist_name, album, track_name)
-            except requests.exceptions.RequestException as e:
-                logging.error(f"Failed to update rating in Navidrome: {e}")
-
 
     TOTAL_TRACKS += 1
 
