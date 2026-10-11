@@ -16,6 +16,8 @@ import tempfile
 
 from dotenv import load_dotenv
 import requests
+from tidal_provider import TidalClient, popularity_score
+from lastfm_matching import lookup_variants, matches_track, normalize_title
 from colorama import init, Fore, Style
 from tqdm import tqdm
 from datetime import timedelta
@@ -38,6 +40,10 @@ NAV_PASS = os.getenv("NAV_PASS")
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
+TIDAL_CLIENT_ID = os.getenv("TIDAL_CLIENT_ID")
+TIDAL_CLIENT_SECRET = os.getenv("TIDAL_CLIENT_SECRET")
+TIDAL_COUNTRY_CODE = os.getenv("TIDAL_COUNTRY_CODE", "US").upper()
+tidal_client = None
 LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_ARTIST_TOP_TRACKS = {}
 MUSICBRAINZ_API_URL = "https://musicbrainz.org/ws/2/"
@@ -58,7 +64,7 @@ LOG_DIR = "logs"
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
-LOGFILE = os.path.join(LOG_DIR, f"spotify-popularity_{int(time.time())}.log")
+LOGFILE = os.path.join(LOG_DIR, f"sonicratings_{int(time.time())}.log")
 
 assert NAV_PASS is not None
 HEX_ENCODED_PASS = NAV_PASS.encode().hex()
@@ -268,7 +274,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--provider",
-    choices=["spotify", "lastfm", "musicbrainz"],
+    choices=["spotify", "lastfm", "musicbrainz", "tidal"],
     default="spotify",
     help="Popularity provider to use for updates",
 )
@@ -320,12 +326,20 @@ if PROVIDER == "spotify":
     )
     assert spotify_token_manager is not None
     SPOTIFY_TOKEN = spotify_token_manager.get_token()
+elif PROVIDER == "tidal":
+    if not TIDAL_CLIENT_ID or not TIDAL_CLIENT_SECRET:
+        logging.error("Config Error: TIDAL_CLIENT_ID and TIDAL_CLIENT_SECRET are required when using --provider tidal.")
+        sys.exit(1)
+    if not re.fullmatch(r"[A-Z]{2}", TIDAL_COUNTRY_CODE):
+        logging.error("Config Error: TIDAL_COUNTRY_CODE must be a two-letter country code (e.g. US).")
+        sys.exit(1)
+    tidal_client = TidalClient(TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET, TIDAL_COUNTRY_CODE)
 elif PROVIDER == "lastfm":
     if not LASTFM_API_KEY:
         logging.error(f"{LIGHT_RED}Config Error: LASTFM_API_KEY is required when using --provider lastfm.{RESET}")
         sys.exit(1)
 
-logging.info(f"{BOLD}Version:{RESET} {LIGHT_YELLOW}sptnr v{__version__}{RESET}")
+logging.info(f"{BOLD}Version:{RESET} {LIGHT_YELLOW}SonicRatings v{__version__}{RESET}")
 
 LOCK = load_lock()
 
@@ -384,6 +398,15 @@ def get_rating_from_popularity(provider_popularity):
         return 5
 
 
+def get_lastfm_rating(score, artist_rank, listeners):
+    """Keep playlist inclusion selective without rescaling Last.fm scores."""
+    if score >= 80 and artist_rank is not None and 1 <= artist_rank <= 3 and listeners >= 100000:
+        return 5
+    if score >= 65:
+        return 4
+    return min(3, get_rating_from_popularity(score))
+
+
 def navidrome_get(url, context, max_retries=None, base_timeout=None):
     # Shared retry wrapper for Navidrome's Subsonic API calls. This covers reads
     # and rating writes, which may time out while Navidrome is scanning the library.
@@ -427,7 +450,7 @@ def navidrome_get(url, context, max_retries=None, base_timeout=None):
 
 # Read the current Navidrome rating for this track so unrated-only mode can skip already-rated songs.
 def get_existing_rating(track_id):
-    nav_url = f"{NAV_BASE_URL}/rest/getSong?id={track_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=myapp&f=json"
+    nav_url = f"{NAV_BASE_URL}/rest/getSong?id={track_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
     try:
         response = navidrome_get(nav_url, f"reading existing rating for {track_id}")
         data = response.json()
@@ -538,9 +561,11 @@ def process_track(track_id, artist_name, album, track_name):
                     continue
 
                 if data.get("error"):
-                    logging.warning(
-                        f"Last.fm error {data.get('error')}: {data.get('message', 'Unknown error')}"
-                    )
+                    # A missing spelling variant is expected; log the final miss once.
+                    if data.get("error") != 6:
+                        logging.warning(
+                            f"Last.fm error {data.get('error')}: {data.get('message', 'Unknown error')}"
+                        )
                     return None
 
                 return data
@@ -558,8 +583,7 @@ def process_track(track_id, artist_name, album, track_name):
         return None
 
     def normalize_lastfm_title(title):
-        normalized = re.sub(r"[^\w\s]", " ", title.casefold())
-        return re.sub(r"\s+", " ", normalized).strip()
+        return normalize_title(title)
 
     def get_lastfm_artist_top_tracks(track_artist, max_retries=3):
         if track_artist in LASTFM_ARTIST_TOP_TRACKS:
@@ -650,7 +674,7 @@ def process_track(track_id, artist_name, album, track_name):
         if track_album:
             search_context += f", album={track_album!r}"
         headers = {
-            "User-Agent": f"sptnr/{__version__} (https://github.com/krestaino/sptnr)",
+            "User-Agent": f"SonicRatings/{__version__} (https://github.com/SickProdigy/SonicRatings)",
             "Accept": "application/json",
         }
 
@@ -716,7 +740,7 @@ def process_track(track_id, artist_name, album, track_name):
     def lookup_musicbrainz_rating(recording_id, max_retries=3):
         rating_context = f"recording_id={recording_id!r}"
         headers = {
-            "User-Agent": f"sptnr/{__version__} (https://github.com/krestaino/sptnr)",
+            "User-Agent": f"SonicRatings/{__version__} (https://github.com/SickProdigy/SonicRatings)",
             "Accept": "application/json",
         }
 
@@ -808,6 +832,7 @@ def process_track(track_id, artist_name, album, track_name):
     ]
 
     spotify_popularity = None
+    tidal_popularity = None
     lastfm_popularity = None
     musicbrainz_rating = None
     navidrome_rating = None
@@ -825,26 +850,64 @@ def process_track(track_id, artist_name, album, track_name):
             track = provider_data["tracks"]["items"][0]
             spotify_popularity = track.get("popularity", 0)
             sp_track_name = track["name"]
+    elif PROVIDER == "tidal":
+        assert tidal_client is not None
+        try:
+            track = tidal_client.find_track(artist_name, track_name, album)
+        except (requests.RequestException, ValueError, KeyError) as error:
+            # Stop on API failures; never turn an authentication or service error
+            # into an unmatched track or a rating write.
+            logging.error("TIDAL lookup failed (%s). Stopping; retry the run later.", type(error).__name__)
+            raise
+        if track:
+            tidal_popularity = popularity_score(track)
+            sp_track_name = track["attributes"]["title"]
     elif PROVIDER == "lastfm":
         # Last.fm exposes listeners and playcount instead of a Spotify-style popularity score.
         # Artist top-track position drives the main score, global listener reach keeps scale
         # across artists, and plays per listener adds a small capped engagement bonus.
-        lastfm_attempts = [
-            (artist_name, track_name),
-            (artist_name, remove_parentheses_content(track_name)),
-            (artist_name, track_name.replace("Part", "Pt.")),
-        ]
+        lastfm_attempts = lookup_variants(artist_name, track_name)
         provider_data = None
+        matched_artist = artist_name
         for attempt_artist, attempt_title in lastfm_attempts:
-            provider_data = search_lastfm(attempt_artist, attempt_title)
-            if provider_data and provider_data.get("track"):
+            candidate = search_lastfm(attempt_artist, attempt_title)
+            candidate_track = candidate.get("track") if candidate else None
+            if not candidate_track or not matches_track(candidate_track, attempt_artist, attempt_title):
+                continue
+            # Empty Last.fm catalog entries must not hide a useful spelling variant.
+            if provider_data is None:
+                provider_data = candidate
+                matched_artist = attempt_artist
+            if int(candidate_track.get("listeners", 0)) > 0 or int(candidate_track.get("playcount", 0)) > 0:
+                provider_data = candidate
+                matched_artist = attempt_artist
+                if (attempt_artist, attempt_title) != (artist_name, track_name):
+                    logging.info(f"    Last.fm spelling match: {attempt_artist} - {attempt_title}")
                 break
+
+        # Some tracks exist in the artist's catalog but track.getInfo cannot find them.
+        # Use that catalog's counts only for the same normalized title/version.
+        if provider_data is None or not (
+            int(provider_data["track"].get("listeners", 0)) > 0
+            or int(provider_data["track"].get("playcount", 0)) > 0
+        ):
+            for attempt_artist in dict.fromkeys(a for a, _ in lastfm_attempts):
+                catalog = get_lastfm_artist_top_tracks(attempt_artist)
+                catalog_match = next((catalog.get(normalize_lastfm_title(title))
+                    for artist, title in lastfm_attempts
+                    if artist == attempt_artist and catalog.get(normalize_lastfm_title(title))), None)
+                if catalog_match and (catalog_match["listeners"] > 0 or catalog_match["playcount"] > 0):
+                    provider_data = {"track": {"name": catalog_match["name"],
+                        "listeners": catalog_match["listeners"], "playcount": catalog_match["playcount"]}}
+                    matched_artist = attempt_artist
+                    logging.info(f"    Last.fm artist catalog match: {attempt_artist} - {catalog_match['name']}")
+                    break
 
         if provider_data and provider_data.get("track"):
             track = provider_data["track"]
             playcount = max(0, int(track.get("playcount", 0)))
             listeners = max(0, int(track.get("listeners", 0)))
-            top_tracks = get_lastfm_artist_top_tracks(artist_name)
+            top_tracks = get_lastfm_artist_top_tracks(matched_artist)
             matched_title = track.get("name", track_name)
             top_track = top_tracks.get(normalize_lastfm_title(matched_title))
             if not top_track:
@@ -877,6 +940,7 @@ def process_track(track_id, artist_name, album, track_name):
                 )
             )
             sp_track_name = matched_title
+            navidrome_rating = get_lastfm_rating(lastfm_popularity, top_track_position, listeners)
     else:      # MusicBrainz ratings come from a lookup on the matched recording MBID.
         mb_attempts = [
             (artist_name, track_name, album),
@@ -902,12 +966,14 @@ def process_track(track_id, artist_name, album, track_name):
         if spotify_popularity is not None
         else lastfm_popularity
         if lastfm_popularity is not None
+        else tidal_popularity
+        if tidal_popularity is not None
         else musicbrainz_rating
     )
 
     if provider_value is not None:
         # MusicBrainz ratings are already 0-5, so use directly; others are 0-100 and need mapping.
-        navidrome_rating = navidrome_rating if PROVIDER == "musicbrainz" else get_rating_from_popularity(provider_value)
+        navidrome_rating = navidrome_rating if PROVIDER in ("musicbrainz", "lastfm") else get_rating_from_popularity(provider_value)
         provider_value_str = f"{provider_value} " if 0 <= provider_value <= 9 else str(provider_value)
         source_label = "s" if PROVIDER == "musicbrainz" else "p"
 
@@ -920,7 +986,7 @@ def process_track(track_id, artist_name, album, track_name):
             pass
         elif PREVIEW != 1:
             try:
-                nav_url = f"{NAV_BASE_URL}/rest/setRating?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=myapp&id={track_id}&rating={navidrome_rating}"
+                nav_url = f"{NAV_BASE_URL}/rest/setRating?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&id={track_id}&rating={navidrome_rating}"
                 navidrome_get(nav_url, f"updating rating for {track_id}")
                 FOUND_AND_UPDATED += 1
                 record_lock(track_id, artist_name, album, track_name)
@@ -931,9 +997,9 @@ def process_track(track_id, artist_name, album, track_name):
         UNMATCHED_TRACKS.append(f"{artist_name} - {album} - {track_name}")
         NOT_FOUND += 1
 
-        if PREVIEW != 1:
+        if PREVIEW != 1 and PROVIDER != "tidal":
             try:
-                nav_url = f"{NAV_BASE_URL}/rest/setRating?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=myapp&id={track_id}&rating=0"
+                nav_url = f"{NAV_BASE_URL}/rest/setRating?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&id={track_id}&rating=0"
                 navidrome_get(nav_url, f"updating rating for {track_id}")
                 record_lock(track_id, artist_name, album, track_name)
             except requests.exceptions.RequestException as e:
@@ -951,7 +1017,7 @@ def process_album(album_id):
         time.sleep(4)
 
     SHOULD_DELAY = False
-    nav_url = f"{NAV_BASE_URL}/rest/getAlbum?id={album_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=spotify_sync&f=json"
+    nav_url = f"{NAV_BASE_URL}/rest/getAlbum?id={album_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
     try:
         response = navidrome_get(nav_url, f"fetching album data for album {album_id}")
         response = response.json()
@@ -962,7 +1028,8 @@ def process_album(album_id):
     album_info = response["subsonic-response"]["album"]
     album_artist = album_info["artist"]
     tracks = [
-        (song["id"], album_artist, song["album"], song["title"])
+        (song["id"], (song.get("artist") or album_artist) if PROVIDER == "lastfm" else album_artist,
+         song["album"], song["title"])
         for song in album_info.get("song", [])
     ]
 
@@ -971,7 +1038,7 @@ def process_album(album_id):
 
 
 def process_artist(artist_id):
-    nav_url = f"{NAV_BASE_URL}/rest/getArtist?id={artist_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=spotify_sync&f=json"
+    nav_url = f"{NAV_BASE_URL}/rest/getArtist?id={artist_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
     try:
         response = navidrome_get(nav_url, f"fetching artist data for artist {artist_id}")
         response = response.json()
@@ -1034,7 +1101,7 @@ except ValueError as e:
 
 if ARTIST_IDs:
     for ARTIST_ID in ARTIST_IDs:
-        url = f"{NAV_BASE_URL}/rest/getArtist?id={ARTIST_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=spotify_sync&f=json"
+        url = f"{NAV_BASE_URL}/rest/getArtist?id={ARTIST_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
         data = fetch_data(url)
         ARTIST_NAME = data["artist"]["name"]
 
@@ -1044,7 +1111,7 @@ if ARTIST_IDs:
 
 elif ALBUM_IDs:
     for ALBUM_ID in ALBUM_IDs:
-        url = f"{NAV_BASE_URL}/rest/getAlbum?id={ALBUM_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=spotify_sync&f=json"
+        url = f"{NAV_BASE_URL}/rest/getAlbum?id={ALBUM_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
         data = fetch_data(url)
         ARTIST_NAME = data["album"]["artist"]
         ARTIST_ID = data["album"]["artistId"]
@@ -1056,7 +1123,7 @@ elif ALBUM_IDs:
         process_album(ALBUM_ID)
 
 else:
-    url = f"{NAV_BASE_URL}/rest/getArtists?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=spotify_sync&f=json"
+    url = f"{NAV_BASE_URL}/rest/getArtists?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
     data = fetch_data(url)
     ARTIST_DATA = [
         (artist["id"], artist["name"])

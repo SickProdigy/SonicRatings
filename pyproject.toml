@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sonicratings-engine"
+version = "0.1.0"
+description = "SonicRatings rating engine for automation and user interfaces"
+requires-python = ">=3.9"
+dependencies = ["requests>=2.31"]
+license = {file = "LICENSE"}
+
+[project.scripts]
+sonicratings-score = "sonicratings_engine.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sonicratings_engine*"]
