@@ -66,11 +66,7 @@ if not os.path.exists(LOG_DIR):
 
 LOGFILE = os.path.join(LOG_DIR, f"sonicratings_{int(time.time())}.log")
 
-assert NAV_PASS is not None
-HEX_ENCODED_PASS = NAV_PASS.encode().hex()
-TOKEN_AUTH = base64.b64encode(
-    f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()
-).decode()
+HEX_ENCODED_PASS = None
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 
 class SpotifyTokenManager:
@@ -114,6 +110,40 @@ class SafeAsciiFormatter(logging.Formatter):
         rendered = super().format(record)
         rendered = self.ansi_escape.sub("", rendered)
         return rendered.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def validate_required_config(provider):
+    missing = []
+
+    for env_name, value in (
+        ("NAV_BASE_URL", NAV_BASE_URL),
+        ("NAV_USER", NAV_USER),
+        ("NAV_PASS", NAV_PASS),
+    ):
+        if not value:
+            missing.append(env_name)
+
+    if provider == "spotify":
+        for env_name, value in (
+            ("SPOTIFY_CLIENT_ID", SPOTIFY_CLIENT_ID),
+            ("SPOTIFY_CLIENT_SECRET", SPOTIFY_CLIENT_SECRET),
+        ):
+            if not value:
+                missing.append(env_name)
+    elif provider == "tidal":
+        for env_name, value in (("TIDAL_CLIENT_ID", TIDAL_CLIENT_ID),
+                                ("TIDAL_CLIENT_SECRET", TIDAL_CLIENT_SECRET)):
+            if not value:
+                missing.append(env_name)
+    elif provider == "lastfm" and not LASTFM_API_KEY:
+        missing.append("LASTFM_API_KEY")
+
+    if missing:
+        missing_str = ", ".join(sorted(set(missing)))
+        logging.error(
+            f"{LIGHT_RED}Config Error: Missing required environment variables: {missing_str}{RESET}"
+        )
+        sys.exit(1)
 
 
 def load_lock():
@@ -316,28 +346,22 @@ UNRATED_ONLY = args.unrated_only
 NAVIDROME_RETRIES = max(1, args.navidrome_retries)
 NAVIDROME_TIMEOUT = max(1, args.navidrome_timeout)
 
+validate_required_config(PROVIDER)
+HEX_ENCODED_PASS = NAV_PASS.encode().hex()
+
 # Build only the provider-specific client we actually need.
 if PROVIDER == "spotify":
-    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-        logging.error(f"{LIGHT_RED}Config Error: SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET are required when using --provider spotify.{RESET}")
-        sys.exit(1)
     spotify_token_manager = SpotifyTokenManager(
         SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, TOKEN_URL
     )
     assert spotify_token_manager is not None
     SPOTIFY_TOKEN = spotify_token_manager.get_token()
 elif PROVIDER == "tidal":
-    if not TIDAL_CLIENT_ID or not TIDAL_CLIENT_SECRET:
-        logging.error("Config Error: TIDAL_CLIENT_ID and TIDAL_CLIENT_SECRET are required when using --provider tidal.")
-        sys.exit(1)
     if not re.fullmatch(r"[A-Z]{2}", TIDAL_COUNTRY_CODE):
         logging.error("Config Error: TIDAL_COUNTRY_CODE must be a two-letter country code (e.g. US).")
         sys.exit(1)
     tidal_client = TidalClient(TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET, TIDAL_COUNTRY_CODE)
-elif PROVIDER == "lastfm":
-    if not LASTFM_API_KEY:
-        logging.error(f"{LIGHT_RED}Config Error: LASTFM_API_KEY is required when using --provider lastfm.{RESET}")
-        sys.exit(1)
+
 
 logging.info(f"{BOLD}Version:{RESET} {LIGHT_YELLOW}SonicRatings v{__version__}{RESET}")
 
