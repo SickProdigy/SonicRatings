@@ -2,6 +2,8 @@
 
 Bring track popularity and community ratings into your Navidrome or Subsonic-compatible music library. SonicRatings supports Spotify, TIDAL, Last.fm, and MusicBrainz as rating sources.
 
+SonicRatings works especially well alongside [navidrome-smart-playlists](https://github.com/SickProdigy/navidrome-smart-playlists). SonicRatings supplies the track ratings, while its Navidrome `.NSP` smart playlist definitions can use those ratings to build dynamic playlists of highly rated music by genre or decade. Run SonicRatings first, then refresh the playlists with a Navidrome library scan.
+
 Originally called **SPTNR** (Spotify Popularity to Navidrome Ratings), this script was developed to repurpose the star ratings in Navidrome. As a Navidrome user who utilizes the 'favorite' feature instead of star ratings, I wanted to give new life and utility to the unused rating system. By mapping provider scores to library ratings, SonicRatings provides a quick way to identify popular tracks. This becomes particularly useful when frequently adding new albums and artists, especially those you're not familiar with.
 
 The CLI is `sonicratings.py`, the automation package is `sonicratings-engine`, and the Compose service is `sonicratings`. Build the local Docker image below; a prebuilt SonicRatings image has not been published yet.
