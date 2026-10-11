@@ -1024,7 +1024,7 @@ def process_track(track_id, artist_name, album, track_name):
             except requests.exceptions.RequestException as e:
                 logging.error(f"Failed to update rating in Navidrome: {e}")
     else:
-        logging.info(f"    p:{LIGHT_RED}??{RESET} -> r:{LIGHT_BLUE}0{RESET} | {LIGHT_RED}(not found) {track_name}{RESET}")
+        logging.info(f"    p:{LIGHT_RED}??{RESET} | {LIGHT_RED}(not found) {track_name}{RESET}; existing rating preserved")
         UNMATCHED_TRACKS.append(f"{artist_name} - {album} - {track_name}")
         NOT_FOUND += 1
 

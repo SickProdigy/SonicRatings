@@ -365,6 +365,11 @@ To give you an idea of the matching accuracy you can expect, here are some stati
 
 ## Logs
 
+Unmatched tracks retain their existing server ratings and are not marked as
+successfully updated, so later runs can retry them. Successful updates save a
+fixed expiry in `logs/song_update_lock.json`; older timestamp-only entries remain
+supported. `--lock-duration 0` still forces a refresh.
+
 Logs are stored in the `logs` directory, and each script execution creates a new log file marked with a timestamp. Since these logs are retained indefinitely, you should manually delete old logs if they are no longer needed.
 
 ### Log Format
