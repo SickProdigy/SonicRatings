@@ -6,7 +6,7 @@ SonicRatings works especially well alongside [navidrome-smart-playlists](https:/
 
 Originally called **SPTNR** (Spotify Popularity to Navidrome Ratings), this script was developed to repurpose the star ratings in Navidrome. As a Navidrome user who utilizes the 'favorite' feature instead of star ratings, I wanted to give new life and utility to the unused rating system. By mapping provider scores to library ratings, SonicRatings provides a quick way to identify popular tracks. This becomes particularly useful when frequently adding new albums and artists, especially those you're not familiar with.
 
-The CLI is `sonicratings.py`, the automation package is `sonicratings-engine`, and the Compose service is `sonicratings`. Build the local Docker image below; a prebuilt SonicRatings image has not been published yet.
+The CLI is `sonicratings.py`, the automation package is `sonicratings-engine`, and the Compose service is `sonicratings`. The Docker examples below build and use the local image `sonicratings:local`.
 
 ![Screenshot of script and phone](https://i.imgur.com/7NhSQFM.png)
 
@@ -42,9 +42,9 @@ The CLI is `sonicratings.py`, the automation package is `sonicratings-engine`, a
 
 ## Requirements
 
-- Python 3.x or Docker
+- Python 3.9 or newer, or Docker
 - Access to a Navidrome or compatible Subsonic server
-- Optional: A Spotify Developer account with an API key ([Get your Spotify API key here](https://developer.spotify.com/dashboard/create))
+- Spotify client ID and client secret for the default Spotify provider ([Developer dashboard](https://developer.spotify.com/dashboard/create))
 - Optional: a Last.fm API key if you want to use Last.fm as the popularity provider
 - Optional: TIDAL developer app credentials if you want to use TIDAL
 - MusicBrainz community rating lookups do not require provider credentials
@@ -60,7 +60,8 @@ docker build -t sonicratings:local .
 ```
 
 ```console
-docker run -t \
+docker run --rm -t \
+  -v sonicratings-logs:/usr/src/app/logs \
   -e NAV_BASE_URL=your_navidrome_server_url \
   -e NAV_USER=your_navidrome_username \
   -e NAV_PASS=your_navidrome_password \
@@ -69,7 +70,9 @@ docker run -t \
   sonicratings:local
 ```
 
-If you want to use Last.fm instead of Spotify, add `-e LASTFM_API_KEY=your_lastfm_api_key` and run with `--provider lastfm`.
+For Last.fm, add `-e LASTFM_API_KEY=your_lastfm_api_key` and `--provider lastfm`. MusicBrainz uses `--provider musicbrainz` without provider credentials. Only the selected provider needs credentials; TIDAL setup is described below.
+
+The `sonicratings-logs` Docker volume keeps logs and update locks between runs. Compose below uses a local `./logs` directory instead.
 
 **Note**: The `-t` flag is used to allocate a pseudo-terminal which assists in displaying colored and bold text in the terminal output, which this script uses.
 
@@ -95,10 +98,12 @@ If you want to use Last.fm instead of Spotify, add `-e LASTFM_API_KEY=your_lastf
          - ./logs:/usr/src/app/logs
    ```
 
+For Last.fm or TIDAL, add that provider's environment variables to the service and pass its `--provider` option when running it.
+
 2. **Run the Script**: Execute the Docker Compose command to run the script:
 
    ```console
-   docker-compose run sonicratings
+   docker compose run --rm sonicratings
    ```
 
 ## Running Natively or Building Locally
@@ -115,10 +120,10 @@ For those who prefer running the script natively using Python or building the Do
    pip install -r requirements.txt
    ```
 
-3. **Configure Environment Variables**: Rename `.env.example` to `.env` and fill in your details:
+3. **Configure Environment Variables**: Copy `.env.example` to `.env` and fill in your details:
 
    ```console
-   mv .env.example .env
+   cp .env.example .env
    # Edit the .env file with your details
    ```
 
@@ -132,10 +137,10 @@ For those who prefer running the script natively using Python or building the Do
 
 1. **Clone the Repository**: Clone the full repository to your local machine so the local Docker build includes the matching and provider modules.
 
-2. **Configure Docker Compose**: Rename and edit your `docker-compose.yml`:
+2. **Configure Docker Compose**: Copy the example and edit your `docker-compose.yml`:
 
    ```console
-   mv docker-compose.yml.example docker-compose.yml
+   cp docker-compose.yml.example docker-compose.yml
    # Edit the docker-compose.yml file
    ```
 
@@ -144,8 +149,8 @@ For those who prefer running the script natively using Python or building the Do
 4. **Build and Run**: Build the Docker image and run the script:
 
    ```console
-   docker-compose build
-   docker-compose run sonicratings [options]
+   docker compose build
+   docker compose run --rm sonicratings [options]
    ```
 
 ## Usage
@@ -154,7 +159,7 @@ The script supports various options for flexible usage. Below are examples of ho
 
 ### Options
 
-- `-p, --preview`: Execute the script in preview mode (no changes made).
+- `-p, --preview`: Look up and display ratings without writing ratings or update locks. Existing locks still apply; add `--lock-duration 0` to preview every selected track.
 - `-a, --artist ARTIST_ID`: Process a specific artist. Multiple artists can be specified.
 - `-b, --album ALBUM_ID`: Process a specific album. Multiple albums can be specified.
 - `-s, --start START_INDEX`: Start processing from the artist at the specified index (0-based).
@@ -165,6 +170,7 @@ The script supports various options for flexible usage. Below are examples of ho
 - `--navidrome-timeout SECONDS`: Base timeout for Navidrome API requests. Defaults to 10 seconds and increases on each retry.
 - `--provider spotify|lastfm|musicbrainz|tidal`: Choose the source used to derive the rating. Spotify is the default.
 - `--unrated-only`: Only update songs that do not already have a Navidrome rating.
+- `-v, --version`: Show the standalone application version.
 
 ### Command Formats
 
@@ -177,12 +183,12 @@ The script supports various options for flexible usage. Below are examples of ho
 2. **Using Docker Compose**:
 
    ```console
-   docker-compose run sonicratings [options]
+   docker compose run --rm sonicratings [options]
    ```
 
 3. **Using Docker Run**:
    ```console
-   docker run -t [environment variables] sonicratings:local [options]
+   docker run --rm -t [environment variables] sonicratings:local [options]
    ```
 
 ## Examples
@@ -191,46 +197,46 @@ The script supports various options for flexible usage. Below are examples of ho
   Run the script in preview mode to see changes without making any actual updates.
 
   - Python: `python sonicratings.py -p`
-  - Docker Compose: `docker-compose run sonicratings -p`
-  - Docker Run: `docker run -t [env vars] sonicratings:local -p`
+  - Docker Compose: `docker compose run --rm sonicratings -p`
+  - Docker Run: `docker run --rm -t [env vars] sonicratings:local -p`
 
 - **Process Specific Artist**:
   Process only one artist by specifying their ID.
 
   - Python: `python sonicratings.py -a artist_id`
-  - Docker Compose: `docker-compose run sonicratings -a artist_id`
-  - Docker Run: `docker run -t [env vars] sonicratings:local -a artist_id`
+  - Docker Compose: `docker compose run --rm sonicratings -a artist_id`
+  - Docker Run: `docker run --rm -t [env vars] sonicratings:local -a artist_id`
 
 - **Process Specific Albums**:
   Process multiple specific albums by specifying their IDs.
 
   - Python: `python sonicratings.py -b album_id1 -b album_id2`
-  - Docker Compose: `docker-compose run sonicratings -b album_id1 -b album_id2`
-  - Docker Run: `docker run -t [env vars] sonicratings:local -b album_id1 -b album_id2`
+  - Docker Compose: `docker compose run --rm sonicratings -b album_id1 -b album_id2`
+  - Docker Run: `docker run --rm -t [env vars] sonicratings:local -b album_id1 -b album_id2`
 
 - **Process Range of Artists**:
   Process artists starting from a certain index with a limit.
   - Python: `python sonicratings.py -s 10 -l 5`
-  - Docker Compose: `docker-compose run sonicratings -s 10 -l 5`
-  - Docker Run: `docker run -t [env vars] sonicratings:local -s 10 -l 5`
+  - Docker Compose: `docker compose run --rm sonicratings -s 10 -l 5`
+  - Docker Run: `docker run --rm -t [env vars] sonicratings:local -s 10 -l 5`
 
 - **Only Update Unrated Songs**:
    Skip tracks that already have a rating in Navidrome.
    - Python: `python sonicratings.py --unrated-only`
-   - Docker Compose: `docker-compose run sonicratings --unrated-only`
-   - Docker Run: `docker run -t [env vars] sonicratings:local --unrated-only`
+   - Docker Compose: `docker compose run --rm sonicratings --unrated-only`
+   - Docker Run: `docker run --rm -t [env vars] sonicratings:local --unrated-only`
 
 - **Tolerate Slow Navidrome Scans**:
    Retry Navidrome API calls and increase the timeout for each retry.
    - Python: `python sonicratings.py --navidrome-retries 3 --navidrome-timeout 10`
-   - Docker Compose: `docker-compose run sonicratings --navidrome-retries 3 --navidrome-timeout 10`
-   - Docker Run: `docker run -t [env vars] sonicratings:local --navidrome-retries 3 --navidrome-timeout 10`
+   - Docker Compose: `docker compose run --rm sonicratings --navidrome-retries 3 --navidrome-timeout 10`
+   - Docker Run: `docker run --rm -t [env vars] sonicratings:local --navidrome-retries 3 --navidrome-timeout 10`
 
 - **Use Last.fm as the Provider**:
    Use Last.fm artist top-track position, listener, and playcount data instead of Spotify popularity.
    - Python: `LASTFM_API_KEY=... python sonicratings.py --provider lastfm`
-   - Docker Compose: `docker-compose run -e LASTFM_API_KEY=... sonicratings --provider lastfm`
-   - Docker Run: `docker run -t -e LASTFM_API_KEY=... [env vars] sonicratings:local --provider lastfm`
+   - Docker Compose: `docker compose run --rm -e LASTFM_API_KEY=... sonicratings --provider lastfm`
+   - Docker Run: `docker run --rm -t -e LASTFM_API_KEY=... [env vars] sonicratings:local --provider lastfm`
 
    Last.fm does not provide a Spotify-style popularity number, so the script derives one from three signals:
 
@@ -252,8 +258,8 @@ The script supports various options for flexible usage. Below are examples of ho
 - **Use MusicBrainz as the Provider**:
    Use MusicBrainz ratings to derive the same 0-5 Navidrome rating.
    - Python: `python sonicratings.py --provider musicbrainz`
-   - Docker Compose: `docker-compose run sonicratings --provider musicbrainz`
-   - Docker Run: `docker run -t [env vars] sonicratings:local --provider musicbrainz`
+   - Docker Compose: `docker compose run --rm sonicratings --provider musicbrainz`
+   - Docker Run: `docker run --rm -t [env vars] sonicratings:local --provider musicbrainz`
 
 ### Use TIDAL as the Provider
 
@@ -280,25 +286,19 @@ In cases where your session gets interrupted - for instance, if your machine goe
 
 To determine the point of interruption, check the log file. The log entry will contain details of the artist it failed on, along with the index in a format similar to: `Artist: ARTIST_NAME (ARTIST_NAVIDROME_ID)[INDEX]`. Here, the index is enclosed in brackets.
 
-When you restart the script, use the `-s INDEX` option, where `INDEX` is the index number from the log. This tells the script to start processing from that specific artist, skipping all previously processed entries.
+Restart with the same provider and processing options, adding `-s INDEX` from the log. This starts again at the interrupted artist; successful updates within that artist are skipped while their locks remain active. For runs selected with `--artist` or `--album`, rerun those IDs instead.
 
 Example command to continue from a specific point:
 
 - Python: `python sonicratings.py -s INDEX`
-- Docker Compose: `docker-compose run sonicratings -s INDEX`
-- Docker Run: `docker run -t [env vars] sonicratings:local -s INDEX`
+- Docker Compose: `docker compose run --rm sonicratings -s INDEX`
+- Docker Run: `docker run --rm -t [env vars] sonicratings:local -s INDEX`
 
 _Note: Replace `[env vars]` with the required environment variable arguments and `INDEX` with the specific index number from your log file._
 
 ## Managing Docker Containers
 
-In this project, `docker-compose run` is used instead of `docker-compose up`. This choice allows for greater flexibility in passing command-line options directly to the script, which is essential for its varied operational modes. It's important to understand that `docker-compose run` and `docker run` create a new container each time they're executed. If you frequently run the script, you might accumulate a number of these containers. To manage this, the following method can be used to remove stopped Docker containers from your system.
-
-**Important Note**: This command removes **all** stopped containers on your system, not just the ones related to this script. Please ensure that you do not have any other stopped containers that you want to keep before running this command. You can check your stopped containers using `docker ps -a` to ensure that removing them won't affect your other Docker projects or setups.
-
-```console
-docker container prune
-```
+Use `docker compose run --rm sonicratings [options]` or `docker run --rm ...` for one-off runs. `--rm` removes the container after it exits; mount `/usr/src/app/logs` to preserve logs and update locks between runs, as the Compose example does.
 
 ## Mapping Provider Scores to Library Ratings
 
@@ -339,19 +339,19 @@ For example, TIDAL popularity `0.20` becomes 20 and receives 1 star; `0.56` beco
 
 ## Estimated Processing Times
 
-For a rough idea of how long a library could take, these estimates scale observed run times after excluding already-rated tracks skipped by `--unrated-only`:
+Rough times to preview a whole library, including already-rated tracks, with no tracks skipped:
 
-| Library Size (Tracks to Process) | Last.fm | MusicBrainz |
+| Library Size (Tracks) | Last.fm Preview | MusicBrainz Preview |
 | ------------------------------- | ------- | ----------- |
-| 1,000                           | ~25 minutes | ~1 hour |
-| 5,000                           | ~2 hours | ~5.5 hours |
-| 10,000                          | ~4 hours | ~11 hours |
-| 50,000                          | ~20 hours | ~2.3 days |
-| 100,000                         | ~1.6 days | ~4.6 days |
+| 1,000                           | ~10 minutes | ~50 minutes |
+| 5,000                           | ~45 minutes | ~4 hours |
+| 10,000                          | ~1.5 hours | ~8 hours |
+| 50,000                          | ~7 hours | ~2 days |
+| 100,000                         | ~14 hours | ~3.5 days |
 
-Actual times vary with metadata, network speed, and API retries. Runs that skip already-rated or locked tracks can finish much sooner. Current Spotify and TIDAL timing samples are not available.
+Actual updates also write ratings and save locks, so they take longer. Metadata, network speed, retries, and large lock files affect runtime; skipping rated or locked tracks speeds repeat runs. Spotify and TIDAL have not been successfully benchmarked.
 
-*Timing basis: Last.fm, October 12-13, 2026 (7h 34m; 19,433 tracks after excluding rated skips); MusicBrainz, June 15-17, 2026 (34h 20m; 31,222 tracks after excluding rated skips). These are rounded projections from mixed runs, not fresh-library benchmarks; revisit after performance changes.*
+*Timing basis: 237 tracks across 48 random albums, tested October 13, 2026 with SonicRatings v1.3.0 (Windows/Python 3.14), using `--preview --lock-duration 0` without `--unrated-only`. Rounded projections; revisit after performance changes.*
 
 ## Importance of Accurate Metadata for Track Lookup
 
@@ -383,7 +383,9 @@ The script logs its actions in a straightforward format, using `p:49 -> r:2` to 
 
 - `p:49` indicates the provider score, where `49` is the specific score.
 - `->` symbolizes the mapping performed by the script.
-- `r:2` shows the Navidrome rating assigned based on the provider score.
+- `r:2` shows the calculated Navidrome rating; preview mode displays it without applying it.
+- MusicBrainz uses `s:` for its 0-5 community rating instead of `p:`.
+- The final `Found` count records successful rating writes, so `Found` and `Match` remain zero in preview mode even when lookups match. Tracks skipped by update locks are excluded from the final `Tracks` count.
 
 ### Terminal Output Colors
 
@@ -406,7 +408,6 @@ writes, MusicBrainz submissions, provenance and retries. arr-scripts installs bo
 packages and owns configuration, import hooks and scheduling. The engine does not
 write ratings to either service by itself.
 
-Engine package 0.1.0 is pinned to `engine-v0.1.0` in the Lidarr installer. Publish
-that package release before deploying the new integration. Its version is separate
+Engine package 0.1.0 is tagged `engine-v0.1.0`. Its version is separate
 from the standalone application's `VERSION` file. Run its focused checks with
 `python -B -m unittest discover -s tests -p test_engine.py`.
