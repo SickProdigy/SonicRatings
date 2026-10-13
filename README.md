@@ -159,7 +159,8 @@ The script supports various options for flexible usage. Below are examples of ho
 - `-b, --album ALBUM_ID`: Process a specific album. Multiple albums can be specified.
 - `-s, --start START_INDEX`: Start processing from the artist at the specified index (0-based).
 - `-l, --limit LIMIT`: Limit the processing to a specific number of artists from the start index.
-- `-d, --lock-duration DURATION`: Number of days to lock song updates (0 to force update every time).
+- `-d, --lock-duration DURATION`: Number of days to lock song updates. Defaults to 7; 0 disables the update lock, while `--unrated-only` still skips already-rated songs.
+- `-j, --lock-jitter HOURS`: Spread new lock expiries across a window of this many hours around the base duration. Defaults to 24 (up to 12 hours earlier or later).
 - `--navidrome-retries RETRIES`: Number of attempts for Navidrome API requests. Defaults to 3.
 - `--navidrome-timeout SECONDS`: Base timeout for Navidrome API requests. Defaults to 10 seconds and increases on each retry.
 - `--provider spotify|lastfm|musicbrainz|tidal`: Choose the source used to derive the rating. Spotify is the default.
@@ -338,17 +339,24 @@ For example, TIDAL popularity `0.20` becomes 20 and receives 1 star; `0.56` beco
 
 ## Estimated Processing Times
 
-The script's processing time can vary based on several factors, including network speed and server response times. However, based on data from my own usage, I can provide a rough estimate of how long the script might take for different library sizes. The following table gives an approximate duration for processing libraries of various sizes:
+Processing time depends on the provider, how many tracks need lookups, metadata quality, and API/server response times. Large runs can take hours or days. Total library size alone is not enough to predict the duration: update locks and `--unrated-only` can skip many tracks, while missing matches can require several lookup attempts.
 
-| Library Size (Number of Tracks) | Estimated Processing Time |
-| ------------------------------- | ------------------------- |
-| 1,000                           | 0h 7m 36s                 |
-| 5,000                           | 0h 38m 4s                 |
-| 10,000                          | 1h 16m 8s                 |
-| 50,000                          | 6h 20m 43s                |
-| 100,000                         | 12h 41m 27s               |
+The previous table extrapolated a historical 6,481-track run that took 49m 21s. That single measurement is not a reliable estimate for the current providers and lookup behavior. Recent completed local runs give more useful context:
 
-These estimates are based on the script's performance with my library of 6,481 tracks, which took approximately 49 minutes and 21 seconds to process. Please note that these times are approximate and actual processing times may vary.
+| Run dates | Provider | Tracks reported | Already-rated tracks skipped | Elapsed time | Scope |
+| --------- | -------- | --------------- | ---------------------------- | ------------ | ----- |
+| June 15-17, 2026 | MusicBrainz | 41,738 | 10,516 | 34h 19m 58s | Completed run; counts from its final summary |
+| October 12-13, 2026 | Last.fm | 53,613 | 34,180 | 7h 34m 17s | Resumed range of 343 artists, starting at index 4,982 |
+
+These are observations from this library, not benchmarks or full-library forecasts. The source logs are `spotify-popularity_1781574480.log` and `sonicratings_1791844502.log` in the local `logs/` directory; logs are not distributed with the repository. Older log filenames can say `spotify-popularity` even when another provider was used; check the opening `Syncing ...` line. `Tracks` includes skipped tracks, and `Found` counts successful rating writes, so it does not count every successful lookup (for example, zero-star results or preview matches). Interrupted runs without a final summary should not be treated as completed benchmarks.
+
+For an estimate suited to your library:
+
+1. Run a representative artist range with your intended provider and options, for example `python sonicratings.py --provider lastfm --unrated-only -s 0 -l 20`.
+2. Read the final `Tracks`, `Skipped`, and `Time` summary. Choose a range containing typical album sizes and both easy and difficult matches; a sample consisting mostly of skipped tracks will underestimate a fresh run.
+3. Scale the elapsed time by the ratio of comparable remaining work to sampled work. Only use track counts when the skipped proportion and album/artist mix are similar, and allow additional time for retries and rate limits. Preview runs omit rating writes and are not equivalent to applying ratings.
+
+MusicBrainz requests are paced at least one second apart by the CLI, and a track may need multiple searches plus a recording-rating lookup. Last.fm can try spelling variants and fetch artist top-track data; other providers also have fallback searches and retries. Navidrome browsing, rating writes, and server timeouts add to the elapsed time. Keep the same provider and skip/lock settings when comparing runs.
 
 ## Importance of Accurate Metadata for Track Lookup
 
@@ -358,7 +366,7 @@ I personally recommend using **MusicBrainz** to tag your music library. MusicBra
 
 However, it's important to acknowledge that even with a perfectly tagged MusicBrainz library, discrepancies can still occur between Spotify and MusicBrainz data. This may result in the script missing some songs during the matching process.
 
-To give you an idea of the matching accuracy you can expect, here are some statistics from my own library, which is tagged using MusicBrainz:
+The following historical Spotify sample came from my MusicBrainz-tagged library. It describes that run, rather than expected matching accuracy for the current library or other providers:
 
 - **Total Tracks**: 6,481
 - **Tracks Matched**: 6,390
@@ -370,7 +378,7 @@ To give you an idea of the matching accuracy you can expect, here are some stati
 Unmatched tracks retain their existing server ratings and are not marked as
 successfully updated, so later runs can retry them. Successful updates save a
 fixed expiry in `logs/song_update_lock.json`; older timestamp-only entries remain
-supported. `--lock-duration 0` still forces a refresh.
+supported. `--lock-duration 0` bypasses update locks; `--unrated-only` still skips already-rated songs.
 
 Logs are stored in the `logs` directory, and each script execution creates a new log file marked with a timestamp. Since these logs are retained indefinitely, you should manually delete old logs if they are no longer needed.
 
