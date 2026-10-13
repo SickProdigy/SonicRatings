@@ -15,5 +15,6 @@ services:
       - TIDAL_CLIENT_ID=your_tidal_client_id
       - TIDAL_CLIENT_SECRET=your_tidal_client_secret
       - TIDAL_COUNTRY_CODE=US
+      - DISCOGS_TOKEN=${DISCOGS_TOKEN:-}
     volumes:
       - ./logs:/usr/src/app/logs

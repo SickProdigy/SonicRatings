@@ -1,6 +1,6 @@
 # SonicRatings
 
-Bring track popularity and community ratings into your Navidrome or Subsonic-compatible music library. SonicRatings supports Spotify, TIDAL, Last.fm, and MusicBrainz as rating sources.
+Bring track popularity and community ratings into your Navidrome or Subsonic-compatible music library. SonicRatings supports Spotify, TIDAL, Last.fm, MusicBrainz, and optional inherited Discogs release ratings.
 
 SonicRatings works especially well alongside [navidrome-smart-playlists](https://github.com/SickProdigy/navidrome-smart-playlists). SonicRatings supplies the track ratings, while its Navidrome `.NSP` smart playlist definitions can use those ratings to build dynamic playlists of highly rated music by genre or decade. Run SonicRatings first, then refresh the playlists with a Navidrome library scan.
 
@@ -33,6 +33,7 @@ The CLI is `sonicratings.py`, the automation package is `sonicratings-engine`, a
 - **TIDAL Support**: Uses TIDAL catalog popularity with the same star conversion as Spotify. Requires TIDAL developer app credentials, not Spotify credentials.
 - **Last.fm Support**: Can use Last.fm artist top-track position, listeners, and playcounts as an alternate popularity source. (A useful alternative when you want broader catalog coverage.)
 - **MusicBrainz Support**: Can use MusicBrainz community ratings as a rating source. (Currently not a lot of ratings available, but worth having as an option for the future.)
+- **Discogs Support**: Preview release ratings and optionally apply them to matching tracks. These are inherited album/edition ratings, with vote counts and release IDs shown in the logs.
 - **Subsonic/Navidrome Integration**: Updates personal track ratings through the Subsonic API based on provider scores.
 - **Flexible Processing**: Process specific artists, albums, or a range of artists or albums.
 - **Unrated-Only Mode**: Skip tracks that already have a rating and only update unrated songs.
@@ -48,6 +49,7 @@ The CLI is `sonicratings.py`, the automation package is `sonicratings-engine`, a
 - Optional: a Last.fm API key if you want to use Last.fm as the popularity provider
 - Optional: TIDAL developer app credentials if you want to use TIDAL
 - MusicBrainz community rating lookups do not require provider credentials
+- Optional: a Discogs personal access token (`DISCOGS_TOKEN`) if anonymous access is insufficient
 
 **Compatibility Note**: SonicRatings is designed for Navidrome and uses the Subsonic API. It should work with any Subsonic/Navidrome server supporting the required browsing, personal-rating, and authentication APIs. Other server implementations have not been tested live. If you successfully use it with another server, please open an issue so I can document compatibility and assist others.
 
@@ -168,7 +170,10 @@ The script supports various options for flexible usage. Below are examples of ho
 - `-j, --lock-jitter HOURS`: Spread new lock expiries across a window of this many hours around the base duration. Defaults to 24 (up to 12 hours earlier or later).
 - `--navidrome-retries RETRIES`: Number of attempts for Navidrome API requests. Defaults to 3.
 - `--navidrome-timeout SECONDS`: Base timeout for Navidrome API requests. Defaults to 10 seconds and increases on each retry.
-- `--provider spotify|lastfm|musicbrainz|tidal`: Choose the source used to derive the rating. Spotify is the default.
+- `--provider spotify|lastfm|musicbrainz|tidal|discogs`: Choose the source used to derive the rating. Spotify is the default.
+- `--discogs-inherit-album-rating`: Explicitly allow Discogs release ratings to be written to matching tracks. Required when applying Discogs ratings; preview works without it.
+- `--discogs-min-votes VOTES`: Minimum votes for a Discogs release rating. Defaults to 5; must be positive.
+- `--discogs-release ALBUM_ID=RELEASE_ID`: Select a specific Discogs edition for a Navidrome album. Repeat for multiple albums. Artist, album, and track matching checks still apply.
 - `--unrated-only`: Only update songs that do not already have a Navidrome rating.
 - `-v, --version`: Show the standalone application version.
 
@@ -280,6 +285,30 @@ docker compose run --rm sonicratings --provider tidal --unrated-only --preview
 
 Remove `--preview` to apply ratings. Searches require matching artist and title (including version), preferring matching albums. Missing matches or missing/invalid popularity preserve existing ratings. Scores mapping to zero do not write a rating or an update lock, so unrated tracks remain eligible on later runs, subject to any existing lock. API failures stop the run rather than clearing ratings.
 
+### Use Discogs as the Provider
+
+Discogs rates releases rather than individual songs. Automatic matching uses the designated main release of a uniquely matched master; it is an edition's rating, not an average across editions. If no master matches, a unique matching release can be used. Ambiguous matches, missing ratings, and releases below the minimum vote count preserve existing track ratings.
+
+Preview first, including tracks with active locks:
+
+```console
+python sonicratings.py --provider discogs --preview --lock-duration 0 -b album_id
+```
+
+To apply the release's rating to matching songs, explicitly enable inheritance:
+
+```console
+python sonicratings.py --provider discogs --discogs-inherit-album-rating --unrated-only
+```
+
+Track titles and performers must match the release's tracklist; live/remix/version words are retained. Compilation matching uses the album artist for the release and each song's performer for its track. Logs identify the Discogs release, selection method, vote count, and inherited rating. Native artist ratings and separate album-rating writes are not included.
+
+Use `--discogs-release album_id=2879` to choose a particular edition. The [Discogs release ID](https://www.discogs.com/release/2879) is the number in its release URL, not a master ID. Ratings need at least five votes by default (`--discogs-min-votes` changes this); averages are rounded to the nearest star, with halves rounded up.
+
+Requests are paced conservatively and album lookups are cached for the run. Anonymous access was tested successfully; if access is denied, set `DISCOGS_TOKEN` to a personal access token from [Discogs developer settings](https://www.discogs.com/settings/developers). For Compose, pass it as `DISCOGS_TOKEN=${DISCOGS_TOKEN:-}` in the service environment, as the example file does. API failures stop the run without writing a rating for the failed lookup. The reusable client is available from `sonicratings_engine.discogs`.
+
+For Docker, rebuild the image and use the same options with `docker compose run --rm sonicratings`.
+
 ## Resuming Interrupted Sessions
 
 In cases where your session gets interrupted - for instance, if your machine goes to sleep, you encounter rate limits from Spotify, or for any other reason that causes the script to not complete - you have the option to resume from where you left off.
@@ -311,6 +340,7 @@ SonicRatings translates provider scores into the library's 5-star rating system.
   - listener reach from the track's unique listener count
   - replay engagement from plays per listener
 - **MusicBrainz**: Reads the community recording rating from MusicBrainz's recording lookup endpoint. MusicBrainz ratings are already on a 0 to 5 scale, so they are rounded directly to Navidrome's 0 to 5 rating range instead of using the 0 to 100 mapping below.
+- **Discogs**: Uses a release's 1–5 community average, rounded directly to stars after checking the vote count. Applying it to tracks requires `--discogs-inherit-album-rating`; it represents the release's rating rather than each song's individual popularity.
 
 For Spotify and TIDAL, the existing conversion uses these exact ranges, without rounding:
 
@@ -349,7 +379,7 @@ Rough times to preview a whole library, including already-rated tracks, with no 
 | 50,000                          | ~7 hours | ~2 days |
 | 100,000                         | ~14 hours | ~3.5 days |
 
-Actual updates also write ratings and save locks, so they take longer. Metadata, network speed, retries, and large lock files affect runtime; skipping rated or locked tracks speeds repeat runs. Spotify and TIDAL have not been successfully benchmarked.
+Actual updates also write ratings and save locks, so they take longer. Metadata, network speed, retries, and large lock files affect runtime; skipping rated or locked tracks speeds repeat runs. Representative timings are not yet available for Spotify, TIDAL, or Discogs.
 
 *Timing basis: 237 tracks across 48 random albums, tested October 13, 2026 with SonicRatings v1.3.0 (Windows/Python 3.14), using `--preview --lock-duration 0` without `--unrated-only`. Rounded projections; revisit after performance changes.*
 
@@ -385,6 +415,7 @@ The script logs its actions in a straightforward format, using `p:49 -> r:2` to 
 - `->` symbolizes the mapping performed by the script.
 - `r:2` shows the calculated Navidrome rating; preview mode displays it without applying it.
 - MusicBrainz uses `s:` for its 0-5 community rating instead of `p:`.
+- Discogs uses `discogs-release:` for the inherited release average and logs its release ID and vote count.
 - The final `Found` count records successful rating writes, so `Found` and `Match` remain zero in preview mode even when lookups match. Tracks skipped by update locks are excluded from the final `Tracks` count.
 
 ### Terminal Output Colors

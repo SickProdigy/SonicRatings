@@ -17,6 +17,7 @@ import tempfile
 from dotenv import load_dotenv
 import requests
 from tidal_provider import TidalClient, popularity_score
+from sonicratings_engine.discogs import DiscogsClient, DiscogsError, positive_id
 from lastfm_matching import lookup_variants, matches_track, normalize_title
 from colorama import init, Fore, Style
 from tqdm import tqdm
@@ -43,6 +44,8 @@ LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
 TIDAL_CLIENT_ID = os.getenv("TIDAL_CLIENT_ID")
 TIDAL_CLIENT_SECRET = os.getenv("TIDAL_CLIENT_SECRET")
 TIDAL_COUNTRY_CODE = os.getenv("TIDAL_COUNTRY_CODE", "US").upper()
+DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN", "")
+discogs_client = None
 tidal_client = None
 LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
 LASTFM_ARTIST_TOP_TRACKS = {}
@@ -311,7 +314,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--provider",
-    choices=["spotify", "lastfm", "musicbrainz", "tidal"],
+    choices=["spotify", "lastfm", "musicbrainz", "tidal", "discogs"],
     default="spotify",
     help="Popularity provider to use for updates",
 )
@@ -320,6 +323,12 @@ parser.add_argument(
     action="store_true",
     help="Only update songs that do not already have a Navidrome rating",
 )
+parser.add_argument("--discogs-inherit-album-rating", action="store_true",
+    help="Explicitly allow Discogs release ratings to be written to matching tracks")
+parser.add_argument("--discogs-min-votes", type=int, default=5,
+    help="Minimum Discogs release rating votes (default: 5)")
+parser.add_argument("--discogs-release", action="append", default=[], metavar="ALBUM_ID=RELEASE_ID",
+    help="Use a specific Discogs edition for a Navidrome album (repeatable)")
 parser.add_argument(
     "--navidrome-retries",
     type=int,
@@ -347,6 +356,22 @@ LIMIT = args.limit
 BASE_LOCK_DURATION = args.lock_duration
 LOCK_JITTER = args.lock_jitter
 PROVIDER = args.provider
+DISCOGS_RELEASE_OVERRIDES = {}
+if args.discogs_min_votes < 1:
+    parser.error("--discogs-min-votes must be positive")
+if PROVIDER != "discogs" and (args.discogs_inherit_album_rating or args.discogs_release or args.discogs_min_votes != 5):
+    parser.error("Discogs options require --provider discogs")
+for override in args.discogs_release:
+    try:
+        album_id, release_id = override.split("=", 1)
+        album_id = album_id.strip()
+        if not album_id or album_id in DISCOGS_RELEASE_OVERRIDES:
+            raise ValueError()
+        DISCOGS_RELEASE_OVERRIDES[album_id] = positive_id(release_id.strip())
+    except ValueError:
+        parser.error("--discogs-release requires a unique ALBUM_ID=positive RELEASE_ID")
+if PROVIDER == "discogs" and not args.preview and not args.discogs_inherit_album_rating:
+    parser.error("Discogs supplies release ratings. Use --preview, or explicitly enable --discogs-inherit-album-rating to apply them to tracks.")
 UNRATED_ONLY = args.unrated_only
 # Navidrome scans can make the API temporarily slow or busy. These settings let
 # long syncs wait out short scan-related stalls instead of aborting the run.
@@ -368,6 +393,8 @@ elif PROVIDER == "tidal":
         logging.error("Config Error: TIDAL_COUNTRY_CODE must be a two-letter country code (e.g. US).")
         sys.exit(1)
     tidal_client = TidalClient(TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET, TIDAL_COUNTRY_CODE)
+elif PROVIDER == "discogs":
+    discogs_client = DiscogsClient(DISCOGS_TOKEN, args.discogs_min_votes)
 
 
 logging.info(f"{BOLD}Version:{RESET} {LIGHT_YELLOW}SonicRatings v{__version__}{RESET}")
@@ -496,13 +523,15 @@ def get_existing_rating(track_id):
 
 
 # Process one track end-to-end: skip locked or already-rated songs, look up popularity, then write the Navidrome rating.
-def process_track(track_id, artist_name, album, track_name):
+def process_track(track_id, artist_name, album, track_name, discogs_album_artist=None, discogs_release_id=None):
 
     # Declare global variables
     global FOUND_AND_UPDATED, UNMATCHED_TRACKS, NOT_FOUND, TOTAL_TRACKS, SKIPPED_RATED
 
     # If the user asked for unrated-only, skip anything that already has a Navidrome score.
     existing_rating = get_existing_rating(track_id)
+    if PROVIDER == "discogs" and UNRATED_ONLY and existing_rating is None:
+        raise DiscogsError("Cannot verify the existing track rating; stopping unrated-only Discogs sync")
     if UNRATED_ONLY and existing_rating not in (None, 0):
         logging.info(
             f"    {LIGHT_YELLOW}Skipping{RESET} {track_name} (Navidrome Rating: {existing_rating})"
@@ -866,6 +895,8 @@ def process_track(track_id, artist_name, album, track_name):
     tidal_popularity = None
     lastfm_popularity = None
     musicbrainz_rating = None
+    discogs_rating = None
+    discogs_match = None
     navidrome_rating = None
     sp_track_name = track_name
 
@@ -972,6 +1003,19 @@ def process_track(track_id, artist_name, album, track_name):
             )
             sp_track_name = matched_title
             navidrome_rating = get_lastfm_rating(lastfm_popularity, top_track_position, listeners)
+    elif PROVIDER == "discogs":
+        try:
+            discogs_match = discogs_client.find_track(artist_name, track_name, album,
+                album_artist=discogs_album_artist, release_id=discogs_release_id)
+        except (DiscogsError, ValueError, KeyError, TypeError) as error:
+            logging.error("Discogs lookup failed (%s). Stopping; existing ratings preserved.", type(error).__name__)
+            raise
+        if discogs_match:
+            discogs_rating = discogs_match["average"]
+            navidrome_rating = discogs_match["rating"]
+            sp_track_name = discogs_match["matched_title"]
+            logging.info("    Discogs release %s | %s | album rating inherited | votes:%s",
+                discogs_match["release_id"], discogs_match["selection"], discogs_match["votes"])
     else:      # MusicBrainz ratings come from a lookup on the matched recording MBID.
         mb_attempts = [
             (artist_name, track_name, album),
@@ -999,14 +1043,16 @@ def process_track(track_id, artist_name, album, track_name):
         if lastfm_popularity is not None
         else tidal_popularity
         if tidal_popularity is not None
+        else discogs_rating
+        if discogs_rating is not None
         else musicbrainz_rating
     )
 
     if provider_value is not None:
         # MusicBrainz ratings are already 0-5, so use directly; others are 0-100 and need mapping.
-        navidrome_rating = navidrome_rating if PROVIDER in ("musicbrainz", "lastfm") else get_rating_from_popularity(provider_value)
+        navidrome_rating = navidrome_rating if PROVIDER in ("musicbrainz", "lastfm", "discogs") else get_rating_from_popularity(provider_value)
         provider_value_str = f"{provider_value} " if 0 <= provider_value <= 9 else str(provider_value)
-        source_label = "s" if PROVIDER == "musicbrainz" else "p"
+        source_label = "discogs-release" if PROVIDER == "discogs" else "s" if PROVIDER == "musicbrainz" else "p"
 
         if navidrome_rating == 0:
             logging.info(f"    {source_label}:{LIGHT_CYAN}{provider_value_str}{RESET} | Skipping {track_name} (Navidrome Rating: 0)")
@@ -1052,13 +1098,17 @@ def process_album(album_id):
     album_info = response["subsonic-response"]["album"]
     album_artist = album_info["artist"]
     tracks = [
-        (song["id"], (song.get("artist") or album_artist) if PROVIDER == "lastfm" else album_artist,
+        (song["id"], (song.get("artist") or album_artist) if PROVIDER in ("lastfm", "discogs") else album_artist,
          song["album"], song["title"])
         for song in album_info.get("song", [])
     ]
 
     for track in tracks:
-        process_track(*track)
+        if PROVIDER == "discogs":
+            process_track(*track, discogs_album_artist=album_artist,
+                discogs_release_id=DISCOGS_RELEASE_OVERRIDES.get(album_id))
+        else:
+            process_track(*track)
 
 
 def process_artist(artist_id):
