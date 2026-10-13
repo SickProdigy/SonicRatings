@@ -339,24 +339,19 @@ For example, TIDAL popularity `0.20` becomes 20 and receives 1 star; `0.56` beco
 
 ## Estimated Processing Times
 
-Processing time depends on the provider, how many tracks need lookups, metadata quality, and API/server response times. Large runs can take hours or days. Total library size alone is not enough to predict the duration: update locks and `--unrated-only` can skip many tracks, while missing matches can require several lookup attempts.
+For a rough idea of how long a library could take, these estimates scale observed run times after excluding already-rated tracks skipped by `--unrated-only`:
 
-The previous table extrapolated a historical 6,481-track run that took 49m 21s. That single measurement is not a reliable estimate for the current providers and lookup behavior. Recent completed local runs give more useful context:
+| Library Size (Tracks to Process) | Last.fm | MusicBrainz |
+| ------------------------------- | ------- | ----------- |
+| 1,000                           | ~25 minutes | ~1 hour |
+| 5,000                           | ~2 hours | ~5.5 hours |
+| 10,000                          | ~4 hours | ~11 hours |
+| 50,000                          | ~20 hours | ~2.3 days |
+| 100,000                         | ~1.6 days | ~4.6 days |
 
-| Run dates | Provider | Tracks reported | Already-rated tracks skipped | Elapsed time | Scope |
-| --------- | -------- | --------------- | ---------------------------- | ------------ | ----- |
-| June 15-17, 2026 | MusicBrainz | 41,738 | 10,516 | 34h 19m 58s | Completed run; counts from its final summary |
-| October 12-13, 2026 | Last.fm | 53,613 | 34,180 | 7h 34m 17s | Resumed range of 343 artists, starting at index 4,982 |
+Actual times vary with metadata, network speed, and API retries. Runs that skip already-rated or locked tracks can finish much sooner. Current Spotify and TIDAL timing samples are not available.
 
-These are observations from this library, not benchmarks or full-library forecasts. The source logs are `spotify-popularity_1781574480.log` and `sonicratings_1791844502.log` in the local `logs/` directory; logs are not distributed with the repository. Older log filenames can say `spotify-popularity` even when another provider was used; check the opening `Syncing ...` line. `Tracks` includes skipped tracks, and `Found` counts successful rating writes, so it does not count every successful lookup (for example, zero-star results or preview matches). Interrupted runs without a final summary should not be treated as completed benchmarks.
-
-For an estimate suited to your library:
-
-1. Run a representative artist range with your intended provider and options, for example `python sonicratings.py --provider lastfm --unrated-only -s 0 -l 20`.
-2. Read the final `Tracks`, `Skipped`, and `Time` summary. Choose a range containing typical album sizes and both easy and difficult matches; a sample consisting mostly of skipped tracks will underestimate a fresh run.
-3. Scale the elapsed time by the ratio of comparable remaining work to sampled work. Only use track counts when the skipped proportion and album/artist mix are similar, and allow additional time for retries and rate limits. Preview runs omit rating writes and are not equivalent to applying ratings.
-
-MusicBrainz requests are paced at least one second apart by the CLI, and a track may need multiple searches plus a recording-rating lookup. Last.fm can try spelling variants and fetch artist top-track data; other providers also have fallback searches and retries. Navidrome browsing, rating writes, and server timeouts add to the elapsed time. Keep the same provider and skip/lock settings when comparing runs.
+*Timing basis: Last.fm, October 12-13, 2026 (7h 34m; 19,433 tracks after excluding rated skips); MusicBrainz, June 15-17, 2026 (34h 20m; 31,222 tracks after excluding rated skips). These are rounded projections from mixed runs, not fresh-library benchmarks; revisit after performance changes.*
 
 ## Importance of Accurate Metadata for Track Lookup
 
