@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import requests
-from tidal_provider import TidalClient, popularity_score
+from sonicratings.tidal import TidalClient, popularity_score
 
 
 def resource(kind, identity, **attributes):
@@ -38,7 +38,7 @@ class TidalTests(unittest.TestCase):
         self.assertEqual(client.find_track("Artist", "Song", "Album")["id"], "2")
         self.assertIsNone(client.find_track("Artist", "Song (Live)", "Album"))
 
-    @patch("tidal_provider.requests.request")
+    @patch("sonicratings.tidal.requests.request")
     def test_authentication_refresh(self, request):
         token = Mock(status_code=200)
         token.json.return_value = {"access_token": "token", "expires_in": 3600}
@@ -51,8 +51,8 @@ class TidalTests(unittest.TestCase):
         self.assertEqual(request.call_count, 4)
         self.assertEqual(request.call_args.kwargs["params"]["countryCode"], "US")
 
-    @patch("tidal_provider.time.sleep")
-    @patch("tidal_provider.requests.request")
+    @patch("sonicratings.tidal.time.sleep")
+    @patch("sonicratings.tidal.requests.request")
     def test_rate_limit_retry(self, request, sleep):
         limited = Mock(status_code=429, headers={"Retry-After": "2"})
         success = Mock(status_code=200)
@@ -63,7 +63,7 @@ class TidalTests(unittest.TestCase):
 
     def test_navidrome_writes_and_preview(self):
         # Load function definitions only: importing the CLI would authenticate and run a sync.
-        tree = ast.parse(Path("sonicratings.py").read_text())
+        tree = ast.parse(Path("sonicratings/cli.py").read_text())
         functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                      and node.name in ("get_rating_from_popularity", "process_track")]
         for score, preview, expected in [(None, 0, None), (math.nan, 0, None), (.1, 0, None), (.56, 1, None), (.56, 0, 3)]:
@@ -80,7 +80,7 @@ class TidalTests(unittest.TestCase):
                     NAV_BASE_URL="http://nav", NAV_USER="user", HEX_ENCODED_PASS="pass",
                     navidrome_get=write, record_lock=lock)
                 context.update({name: "" for name in ["LIGHT_YELLOW", "RESET", "LIGHT_CYAN", "LIGHT_BLUE", "LIGHT_GREEN", "LIGHT_RED"]})
-                exec(compile(ast.Module(body=functions, type_ignores=[]), "sonicratings.py", "exec"), context)
+                exec(compile(ast.Module(body=functions, type_ignores=[]), "sonicratings/cli.py", "exec"), context)
                 context["process_track"]("local", "Artist", "Album", "Song")
                 if expected is None:
                     write.assert_not_called()

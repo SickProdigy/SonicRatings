@@ -1,73 +1,47 @@
-with open("VERSION", "r") as file:
-    __version__ = file.read().strip()
-
+"""SonicRatings command: sync provider ratings to Navidrome/Subsonic."""
 import argparse
+from pathlib import Path
+
 import base64
+
 import json
+
 import math
+
 import logging
+
 import os
+
 import re
+
 import sys
+
 import time
+
 import urllib.parse
+
 import random
+
 import tempfile
 
 from dotenv import load_dotenv
+
 import requests
-from tidal_provider import TidalClient, popularity_score
-from lastfm_matching import lookup_variants, matches_track, normalize_title
+
+from .tidal import TidalClient, popularity_score
+
+from .discogs import DiscogsClient, DiscogsError, positive_id
+
+from .lastfm_matching import lookup_variants, matches_track, normalize_title
+
 from colorama import init, Fore, Style
+
 from tqdm import tqdm
+
 from datetime import timedelta
 
-# Load environment variables from .env file if it exists
-if os.path.exists(".env"):
-    load_dotenv()
+from . import __version__
 
-# Record the start time
-start_time = time.time()
-
-LOCK_DIR = "logs"
-LOCK_FILENAME = "song_update_lock.json"
-LOCK_FILE = LOCK_DIR + "/" + LOCK_FILENAME
-
-# Config
-NAV_BASE_URL = os.getenv("NAV_BASE_URL")
-NAV_USER = os.getenv("NAV_USER")
-NAV_PASS = os.getenv("NAV_PASS")
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
-TIDAL_CLIENT_ID = os.getenv("TIDAL_CLIENT_ID")
-TIDAL_CLIENT_SECRET = os.getenv("TIDAL_CLIENT_SECRET")
-TIDAL_COUNTRY_CODE = os.getenv("TIDAL_COUNTRY_CODE", "US").upper()
-tidal_client = None
-LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
-LASTFM_ARTIST_TOP_TRACKS = {}
-MUSICBRAINZ_API_URL = "https://musicbrainz.org/ws/2/"
-MUSICBRAINZ_LAST_REQUEST_AT = 0
-
-# Colors
-LIGHT_PURPLE = Fore.MAGENTA + Style.BRIGHT
-LIGHT_GREEN = Fore.GREEN + Style.BRIGHT
-LIGHT_RED = Fore.RED + Style.BRIGHT
-LIGHT_BLUE = Fore.BLUE + Style.BRIGHT
-LIGHT_CYAN = Fore.CYAN + Style.BRIGHT
-LIGHT_YELLOW = Fore.YELLOW + Style.BRIGHT
-BOLD = Style.BRIGHT
-RESET = Style.RESET_ALL
-
-# Setup logs
-LOG_DIR = "logs"
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
-
-LOGFILE = os.path.join(LOG_DIR, f"sonicratings_{int(time.time())}.log")
-
-HEX_ENCODED_PASS = None
-TOKEN_URL = "https://accounts.spotify.com/api/token"
 
 class SpotifyTokenManager:
     def __init__(self, client_id, client_secret, token_url):
@@ -111,7 +85,6 @@ class SafeAsciiFormatter(logging.Formatter):
         rendered = self.ansi_escape.sub("", rendered)
         return rendered.encode("ascii", "backslashreplace").decode("ascii")
 
-
 def validate_required_config(provider):
     missing = []
 
@@ -145,7 +118,6 @@ def validate_required_config(provider):
         )
         sys.exit(1)
 
-
 def load_lock():
     if not os.path.exists(LOCK_FILE):
         return {}
@@ -157,7 +129,7 @@ def load_lock():
         os.rename(LOCK_FILE, LOCK_FILE + ".corrupt")
         return {}
     except Exception as e:
-        logging.error(f"{LIGHT_RED}Error loading lock file '{LOCK_FILE}': {e}{RESET}")
+        logging.error(f"{LIGHT_RED}Error loading lock file '{LOCK_FILE}': {type(e).__name__}{RESET}")
         return {}
 
 def save_lock(lock):
@@ -168,17 +140,25 @@ def save_lock(lock):
         tempname = tf.name
     os.replace(tempname, LOCK_FILE)
 
-
-# Lock entries used to be stored as plain timestamps. Newer entries include the
-# timestamp plus track context, so this keeps old lock files compatible.
 def get_lock_timestamp(lock_entry):
     if isinstance(lock_entry, dict):
         return lock_entry.get("updated_at") or lock_entry.get("timestamp")
     return lock_entry
 
+def record_provenance(track_id, rating, pending):
+    """Persist intent before a remote write so uncertain responses retain its source."""
+    path = Path(PROVENANCE_FILE)
+    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    data[str(track_id)] = {"value": rating, "source": PROVIDER,
+        "recording": TRACK_IDENTITIES.get(str(track_id), ""),
+        "pending": pending, "updated": time.time()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, encoding="utf-8") as handle:
+        json.dump(data, handle)
+        temporary = handle.name
+    os.replace(temporary, path)
 
-# Store enough context in the lock file to identify what was updated. That makes
-# long interrupted runs easier to inspect without changing the lock behavior.
+
 def record_lock(track_id, artist_name, album, track_name):
     updated_at = time.time()
     LOCK[track_id] = {
@@ -202,7 +182,6 @@ def should_update(song_id):
         return time.time() > lock_entry["expires_at"]
     return (time.time() - last_update_ts) > lock_expiry_seconds
 
-
 def get_lock_expiry(song_id=None, updated_at=None):
     if (BASE_LOCK_DURATION == 0):
         return 0  # No lock duration, force update every time
@@ -216,183 +195,11 @@ def get_lock_expiry(song_id=None, updated_at=None):
     expiry = max(expiry, timedelta(days=1))
     return expiry.total_seconds()
 
-# Set up the stream handler (console logging) without timestamp
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(SafeAsciiFormatter("%(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[console_handler])
-
-# Set up the file handler (file logging) with timestamp
-file_handler = logging.FileHandler(LOGFILE, "a", encoding="ascii", errors="backslashreplace")
-file_handler.setFormatter(SafeAsciiFormatter("[%(asctime)s] %(message)s"))
-logging.getLogger().addHandler(file_handler)
-
-
 def log_unhandled_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
     logging.error("Unhandled error during sync", exc_info=(exc_type, exc_value, exc_traceback))
-
-
-sys.excepthook = log_unhandled_exception
-
-# Authentication
-spotify_token_manager = None
-SPOTIFY_TOKEN = None
-
-init(autoreset=True)
-
-# Default flags
-PREVIEW = 0
-START = 0
-LIMIT = 0
-ARTIST_IDs = []
-ALBUM_IDs = []
-
-# Variables
-ARTISTS_PROCESSED = 0
-TOTAL_TRACKS = 0
-FOUND_AND_UPDATED = 0
-NOT_FOUND = 0
-SKIPPED_RATED = 0
-UNMATCHED_TRACKS = []
-
-# Parse arguments
-description_text = "process command-line flags for sync"
-parser = argparse.ArgumentParser()
-
-parser.add_argument(
-    "-p",
-    "--preview",
-    action="store_true",
-    help="execute script in preview mode (no changes made)",
-)
-parser.add_argument(
-    "-a",
-    "--artist",
-    action="append",
-    help="process the artist using the Navidrome artist ID (ignores START and LIMIT)",
-    type=str,
-)
-parser.add_argument(
-    "-b",
-    "--album",
-    action="append",
-    help="process the album using the Navidrome album ID (ignores START and LIMIT)",
-    type=str,
-)
-parser.add_argument(
-    "-s",
-    "--start",
-    default=0,
-    type=int,
-    help="start processing from artist at index [NUM] (0-based index, so 0 is the first artist)",
-)
-parser.add_argument(
-    "-l",
-    "--limit",
-    default=0,
-    type=int,
-    help="limit to processing [NUM] artists from the start index",
-)
-parser.add_argument(
-    "-d",
-    "--lock-duration",
-    type=int,
-    default=7,
-    help="Number of days to lock song updates (0 to force update every time)",
-)
-parser.add_argument(
-    "-j",
-    "--lock-jitter",
-    type=int,
-    default=24,
-    help="Number of hours to add random jitter to the lock duration",
-)
-parser.add_argument(
-    "--provider",
-    choices=["spotify", "lastfm", "musicbrainz", "tidal"],
-    default="spotify",
-    help="Popularity provider to use for updates",
-)
-parser.add_argument(
-    "--unrated-only",
-    action="store_true",
-    help="Only update songs that do not already have a Navidrome rating",
-)
-parser.add_argument(
-    "--navidrome-retries",
-    type=int,
-    default=3,
-    help="Number of attempts for Navidrome API requests",
-)
-parser.add_argument(
-    "--navidrome-timeout",
-    type=int,
-    default=10,
-    help="Base timeout in seconds for Navidrome API requests; each retry increases it",
-)
-
-parser.add_argument(
-    "-v", "--version", action="version", version=f"%(prog)s {__version__}"
-)
-
-
-args = parser.parse_args()
-
-ARTIST_IDs = args.artist if args.artist else []
-ALBUM_IDs = args.album if args.album else []
-START = args.start
-LIMIT = args.limit
-BASE_LOCK_DURATION = args.lock_duration
-LOCK_JITTER = args.lock_jitter
-PROVIDER = args.provider
-UNRATED_ONLY = args.unrated_only
-# Navidrome scans can make the API temporarily slow or busy. These settings let
-# long syncs wait out short scan-related stalls instead of aborting the run.
-NAVIDROME_RETRIES = max(1, args.navidrome_retries)
-NAVIDROME_TIMEOUT = max(1, args.navidrome_timeout)
-
-validate_required_config(PROVIDER)
-HEX_ENCODED_PASS = NAV_PASS.encode().hex()
-
-# Build only the provider-specific client we actually need.
-if PROVIDER == "spotify":
-    spotify_token_manager = SpotifyTokenManager(
-        SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, TOKEN_URL
-    )
-    assert spotify_token_manager is not None
-    SPOTIFY_TOKEN = spotify_token_manager.get_token()
-elif PROVIDER == "tidal":
-    if not re.fullmatch(r"[A-Z]{2}", TIDAL_COUNTRY_CODE):
-        logging.error("Config Error: TIDAL_COUNTRY_CODE must be a two-letter country code (e.g. US).")
-        sys.exit(1)
-    tidal_client = TidalClient(TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET, TIDAL_COUNTRY_CODE)
-
-
-logging.info(f"{BOLD}Version:{RESET} {LIGHT_YELLOW}SonicRatings v{__version__}{RESET}")
-
-LOCK = load_lock()
-
-SHOULD_DELAY = False
-
-if args.preview:
-    logging.info(f"{LIGHT_YELLOW}Preview mode, no changes will be made.{RESET}")
-    PREVIEW = 1
-
-# Check if both ARTIST_ID and START/LIMIT are provided
-if ARTIST_IDs and (START != 0 or LIMIT != 0):
-    START = 0
-    LIMIT = 0
-    logging.info(
-        f"{LIGHT_YELLOW}Warning: The --artist flag overrides --start and --limit. Ignoring these settings.{RESET}"
-    )
-
-if not args.preview:
-    logging.info(
-        f"{BOLD}Syncing {PROVIDER.title()} {LIGHT_CYAN}popularity{RESET}{BOLD} with Navidrome {LIGHT_BLUE}rating{RESET}...{RESET}"
-    )
-
 
 def validate_url(url):
     if not re.match(r"https?://", url):
@@ -407,12 +214,9 @@ def validate_url(url):
         return False
     return True
 
-
 def url_encode(string):
     return urllib.parse.quote_plus(string)
 
-
-# Convert the popularity-like score into Navidrome's 0-5 rating buckets.
 def get_rating_from_popularity(provider_popularity):
     provider_popularity = float(provider_popularity)
     if provider_popularity < 16.66:
@@ -428,6 +232,28 @@ def get_rating_from_popularity(provider_popularity):
     else:
         return 5
 
+def get_lastfm_popularity(listeners, playcount, top_track_position):
+    """Calculate the Last.fm rank, reach, and replay score used by synchronization."""
+    top_track_position_score = 0
+    if top_track_position:
+        top_track_position_score = max(0, 100 - (math.log2(top_track_position) * 10))
+
+    if listeners == 0 or playcount == 0:
+        reach_score = 0
+        engagement_bonus = 0
+    else:
+        plays_per_listener = playcount / listeners
+        reach_score = min(90, math.log10(listeners + 1) * 13)
+        engagement_bonus = min(12, math.log2(plays_per_listener) * 4)
+    lastfm_popularity = round(
+        min(
+            100,
+            (top_track_position_score * 0.50)
+            + (reach_score * 0.40)
+            + (engagement_bonus * 0.10),
+        )
+    )
+    return lastfm_popularity
 
 def get_lastfm_rating(score, artist_rank, listeners):
     """Keep playlist inclusion selective without rescaling Last.fm scores."""
@@ -436,7 +262,6 @@ def get_lastfm_rating(score, artist_rank, listeners):
     if score >= 65:
         return 4
     return min(3, get_rating_from_popularity(score))
-
 
 def navidrome_get(url, context, max_retries=None, base_timeout=None):
     # Shared retry wrapper for Navidrome's Subsonic API calls. This covers reads
@@ -461,12 +286,16 @@ def navidrome_get(url, context, max_retries=None, base_timeout=None):
                 continue
 
             response.raise_for_status()
+            if "/rest/setRating?" in url:
+                result = response.json().get("subsonic-response", {})
+                if result.get("status") != "ok":
+                    raise RuntimeError("Subsonic rejected the rating update")
             return response
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             wait_time = (attempt + 1) * 2
             logging.warning(
-                f"Connection error while {context}: {e}. "
+                f"Connection error while {context}: {type(e).__name__}. "
                 f"Attempt {attempt + 1}/{max_retries} with timeout {timeout}s. Waiting {wait_time}s..."
             )
             time.sleep(wait_time)
@@ -478,31 +307,43 @@ def navidrome_get(url, context, max_retries=None, base_timeout=None):
         f"Navidrome request failed after {max_retries} attempts while {context}"
     )
 
-
-# Read the current Navidrome rating for this track so unrated-only mode can skip already-rated songs.
 def get_existing_rating(track_id):
     nav_url = f"{NAV_BASE_URL}/rest/getSong?id={track_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
     try:
         response = navidrome_get(nav_url, f"reading existing rating for {track_id}")
         data = response.json()
         song = data["subsonic-response"]["song"]
-        rating_value = song.get("rating", song.get("userRating", 0))
+        expected = globals().get("AUTOMATION_TRACKS", {}).get(str(track_id))
+        if expected:
+            from .automation import find_song
+            if find_song(expected, {str(track_id): song}) is None:
+                raise ValueError("Queued song identity changed")
+        identities = globals().get("TRACK_IDENTITIES")
+        if identities is not None:
+            from .automation import mbid
+            recording = mbid(song.get("musicBrainzId"))
+            if recording:
+                identities[str(track_id)] = recording
+        rating_value = song.get("userRating", song.get("rating", 0))
         if rating_value in (None, ""):
             return 0
-        return int(rating_value)
+        number = int(rating_value)
+        if not 0 <= number <= 5 or float(rating_value) != number:
+            raise ValueError("Invalid personal rating")
+        return number
     except (requests.exceptions.RequestException, ValueError, KeyError, TypeError) as e:
-        logging.warning(f"{LIGHT_YELLOW}Unable to read existing rating for {track_id}: {e}{RESET}")
+        logging.warning(f"{LIGHT_YELLOW}Unable to read existing rating for {track_id}: {type(e).__name__}{RESET}")
         return None
 
-
-# Process one track end-to-end: skip locked or already-rated songs, look up popularity, then write the Navidrome rating.
-def process_track(track_id, artist_name, album, track_name):
+def process_track(track_id, artist_name, album, track_name, discogs_album_artist=None, discogs_release_id=None):
 
     # Declare global variables
     global FOUND_AND_UPDATED, UNMATCHED_TRACKS, NOT_FOUND, TOTAL_TRACKS, SKIPPED_RATED
 
     # If the user asked for unrated-only, skip anything that already has a Navidrome score.
     existing_rating = get_existing_rating(track_id)
+    if UNRATED_ONLY and existing_rating is None:
+        raise DiscogsError("Cannot verify the existing track rating; stopping unrated-only Discogs sync")
     if UNRATED_ONLY and existing_rating not in (None, 0):
         logging.info(
             f"    {LIGHT_YELLOW}Skipping{RESET} {track_name} (Navidrome Rating: {existing_rating})"
@@ -552,11 +393,11 @@ def process_track(track_id, artist_name, album, track_name):
                 
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 wait_time = (attempt + 1) * 2
-                logging.warning(f"Connection error: {e}. Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
+                logging.warning(f"Connection error: {type(e).__name__}. Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             except requests.exceptions.RequestException as e:
-                logging.error(f"Request failed: {e}")
+                logging.error(f"Request failed: {type(e).__name__}")
                 break
         
         # If we get here, all retries failed
@@ -603,11 +444,11 @@ def process_track(track_id, artist_name, album, track_name):
 
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 wait_time = (attempt + 1) * 2
-                logging.warning(f"Connection error: {e}. Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
+                logging.warning(f"Connection error: {type(e).__name__}. Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             except requests.exceptions.RequestException as e:
-                logging.error(f"Request failed: {e}")
+                logging.error(f"Request failed: {type(e).__name__}")
                 break
 
         logging.error(f"Failed after {max_retries} attempts for query: {track_artist} - {track_title}")
@@ -671,11 +512,11 @@ def process_track(track_id, artist_name, album, track_name):
 
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 wait_time = (attempt + 1) * 2
-                logging.warning(f"Connection error: {e}. Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
+                logging.warning(f"Connection error: {type(e).__name__}. Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s...")
                 time.sleep(wait_time)
                 continue
             except requests.exceptions.RequestException as e:
-                logging.error(f"Request failed: {e}")
+                logging.error(f"Request failed: {type(e).__name__}")
                 break
 
         logging.error(f"Failed after {max_retries} attempts for Last.fm top tracks: {track_artist}")
@@ -750,13 +591,13 @@ def process_track(track_id, artist_name, album, track_name):
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 wait_time = (attempt + 1) * 2
                 logging.warning(
-                    f"Connection error while searching MusicBrainz ({search_context}): {e}. "
+                    f"Connection error while searching MusicBrainz ({search_context}): {type(e).__name__}. "
                     f"Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s..."
                 )
                 time.sleep(wait_time)
                 continue
             except requests.exceptions.RequestException as e:
-                logging.error(f"Request failed: {e}")
+                logging.error(f"Request failed: {type(e).__name__}")
                 break
 
         logging.error(
@@ -827,13 +668,13 @@ def process_track(track_id, artist_name, album, track_name):
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 wait_time = (attempt + 1) * 2
                 logging.warning(
-                    f"Connection error while looking up MusicBrainz rating ({rating_context}): {e}. "
+                    f"Connection error while looking up MusicBrainz rating ({rating_context}): {type(e).__name__}. "
                     f"Attempt {attempt + 1}/{max_retries}. Waiting {wait_time}s..."
                 )
                 time.sleep(wait_time)
                 continue
             except requests.exceptions.RequestException as e:
-                logging.error(f"Request failed: {e}")
+                logging.error(f"Request failed: {type(e).__name__}")
                 break
 
         logging.error(
@@ -866,6 +707,8 @@ def process_track(track_id, artist_name, album, track_name):
     tidal_popularity = None
     lastfm_popularity = None
     musicbrainz_rating = None
+    discogs_rating = None
+    discogs_match = None
     navidrome_rating = None
     sp_track_name = track_name
 
@@ -951,27 +794,22 @@ def process_track(track_id, artist_name, album, track_name):
                 listeners = max(listeners, top_track["listeners"])
                 playcount = max(playcount, top_track["playcount"])
 
-            top_track_position_score = 0
-            if top_track_position:
-                top_track_position_score = max(0, 100 - (math.log2(top_track_position) * 10))
-
-            if listeners == 0 or playcount == 0:
-                reach_score = 0
-                engagement_bonus = 0
-            else:
-                plays_per_listener = playcount / listeners
-                reach_score = min(90, math.log10(listeners + 1) * 13)
-                engagement_bonus = min(12, math.log2(plays_per_listener) * 4)
-            lastfm_popularity = round(
-                min(
-                    100,
-                    (top_track_position_score * 0.50)
-                    + (reach_score * 0.40)
-                    + (engagement_bonus * 0.10),
-                )
-            )
+            lastfm_popularity = get_lastfm_popularity(listeners, playcount, top_track_position)
             sp_track_name = matched_title
             navidrome_rating = get_lastfm_rating(lastfm_popularity, top_track_position, listeners)
+    elif PROVIDER == "discogs":
+        try:
+            discogs_match = discogs_client.find_track(artist_name, track_name, album,
+                album_artist=discogs_album_artist, release_id=discogs_release_id)
+        except (DiscogsError, ValueError, KeyError, TypeError) as error:
+            logging.error("Discogs lookup failed (%s). Stopping; existing ratings preserved.", type(error).__name__)
+            raise
+        if discogs_match:
+            discogs_rating = discogs_match["average"]
+            navidrome_rating = discogs_match["rating"]
+            sp_track_name = discogs_match["matched_title"]
+            logging.info("    Discogs release %s | %s | album rating inherited | votes:%s",
+                discogs_match["release_id"], discogs_match["selection"], discogs_match["votes"])
     else:      # MusicBrainz ratings come from a lookup on the matched recording MBID.
         mb_attempts = [
             (artist_name, track_name, album),
@@ -999,14 +837,16 @@ def process_track(track_id, artist_name, album, track_name):
         if lastfm_popularity is not None
         else tidal_popularity
         if tidal_popularity is not None
+        else discogs_rating
+        if discogs_rating is not None
         else musicbrainz_rating
     )
 
     if provider_value is not None:
         # MusicBrainz ratings are already 0-5, so use directly; others are 0-100 and need mapping.
-        navidrome_rating = navidrome_rating if PROVIDER in ("musicbrainz", "lastfm") else get_rating_from_popularity(provider_value)
+        navidrome_rating = navidrome_rating if PROVIDER in ("musicbrainz", "lastfm", "discogs") else get_rating_from_popularity(provider_value)
         provider_value_str = f"{provider_value} " if 0 <= provider_value <= 9 else str(provider_value)
-        source_label = "s" if PROVIDER == "musicbrainz" else "p"
+        source_label = "discogs-release" if PROVIDER == "discogs" else "s" if PROVIDER == "musicbrainz" else "p"
 
         if navidrome_rating == 0:
             logging.info(f"    {source_label}:{LIGHT_CYAN}{provider_value_str}{RESET} | Skipping {track_name} (Navidrome Rating: 0)")
@@ -1017,12 +857,24 @@ def process_track(track_id, artist_name, album, track_name):
             pass
         elif PREVIEW != 1:
             try:
-                nav_url = f"{NAV_BASE_URL}/rest/setRating?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&id={track_id}&rating={navidrome_rating}"
+                nav_url = f"{NAV_BASE_URL}/rest/setRating?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&id={track_id}&rating={navidrome_rating}&f=json"
+                if UNRATED_ONLY:
+                    latest_rating = get_existing_rating(track_id)
+                    if latest_rating is None:
+                        raise RuntimeError("Cannot verify the personal rating before write")
+                    if latest_rating:
+                        SKIPPED_RATED += 1
+                        TOTAL_TRACKS += 1
+                        return
+                if globals().get("PROVENANCE_FILE"):
+                    record_provenance(track_id, navidrome_rating, pending=True)
                 navidrome_get(nav_url, f"updating rating for {track_id}")
+                if globals().get("PROVENANCE_FILE"):
+                    record_provenance(track_id, navidrome_rating, pending=False)
                 FOUND_AND_UPDATED += 1
                 record_lock(track_id, artist_name, album, track_name)
             except requests.exceptions.RequestException as e:
-                logging.error(f"Failed to update rating in Navidrome: {e}")
+                logging.error(f"Failed to update rating in Navidrome: {type(e).__name__}")
     else:
         logging.info(f"    p:{LIGHT_RED}??{RESET} | {LIGHT_RED}(not found) {track_name}{RESET}; existing rating preserved")
         UNMATCHED_TRACKS.append(f"{artist_name} - {album} - {track_name}")
@@ -1046,20 +898,23 @@ def process_album(album_id):
         response = navidrome_get(nav_url, f"fetching album data for album {album_id}")
         response = response.json()
     except (requests.exceptions.RequestException, ValueError):
-        logging.exception(f"Failed to fetch album data for album {album_id}")
+        logging.error(f"Failed to fetch album data for album {album_id}")
         raise
 
     album_info = response["subsonic-response"]["album"]
     album_artist = album_info["artist"]
     tracks = [
-        (song["id"], (song.get("artist") or album_artist) if PROVIDER == "lastfm" else album_artist,
+        (song["id"], (song.get("artist") or album_artist) if PROVIDER in ("lastfm", "discogs") else album_artist,
          song["album"], song["title"])
         for song in album_info.get("song", [])
     ]
 
     for track in tracks:
-        process_track(*track)
-
+        if PROVIDER == "discogs":
+            process_track(*track, discogs_album_artist=album_artist,
+                discogs_release_id=DISCOGS_RELEASE_OVERRIDES.get(album_id))
+        else:
+            process_track(*track)
 
 def process_artist(artist_id):
     nav_url = f"{NAV_BASE_URL}/rest/getArtist?id={artist_id}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
@@ -1067,7 +922,7 @@ def process_artist(artist_id):
         response = navidrome_get(nav_url, f"fetching artist data for artist {artist_id}")
         response = response.json()
     except (requests.exceptions.RequestException, ValueError):
-        logging.exception(f"Failed to fetch artist data for artist {artist_id}")
+        logging.error(f"Failed to fetch artist data for artist {artist_id}")
         raise
 
     albums = [
@@ -1078,7 +933,6 @@ def process_artist(artist_id):
     for album_id, album_name in albums:
         logging.info(f"  Album: {LIGHT_YELLOW}{album_name}{RESET} ({album_id})")
         process_album(album_id)
-
 
 def fetch_data(url):
     try:
@@ -1107,7 +961,7 @@ def fetch_data(url):
         sys.exit(1)
     except requests.exceptions.RequestException as e:
         logging.error(
-            f"{LIGHT_RED}Connection Error: An error occurred while trying to connect to Navidrome: {e}{RESET}"
+            f"{LIGHT_RED}Connection Error: An error occurred while trying to connect to Navidrome: {type(e).__name__}{RESET}"
         )
         sys.exit(1)
     except json.JSONDecodeError:
@@ -1116,116 +970,394 @@ def fetch_data(url):
         )
         sys.exit(1)
 
+def parse_args(argv=None):
+    description_text = "Sync provider ratings to Navidrome/Subsonic"
+    parser = argparse.ArgumentParser(description=description_text)
 
-try:
-    validate_url(NAV_BASE_URL)
-except ValueError as e:
-    logging.error(f"{LIGHT_RED}{e}{RESET}")
-    sys.exit(1)
+    parser.add_argument(
+        "-p",
+        "--preview",
+        action="store_true",
+        help="execute script in preview mode (no changes made)",
+    )
+    parser.add_argument(
+        "-a",
+        "--artist",
+        action="append",
+        help="process the artist using the Navidrome artist ID (ignores START and LIMIT)",
+        type=str,
+    )
+    parser.add_argument(
+        "-b",
+        "--album",
+        action="append",
+        help="process the album using the Navidrome album ID (ignores START and LIMIT)",
+        type=str,
+    )
+    parser.add_argument(
+        "-s",
+        "--start",
+        default=0,
+        type=int,
+        help="start processing from artist at index [NUM] (0-based index, so 0 is the first artist)",
+    )
+    parser.add_argument(
+        "-l",
+        "--limit",
+        default=0,
+        type=int,
+        help="limit to processing [NUM] artists from the start index",
+    )
+    parser.add_argument(
+        "-d",
+        "--lock-duration",
+        type=int,
+        default=7,
+        help="Number of days to lock song updates (0 to force update every time)",
+    )
+    parser.add_argument(
+        "-j",
+        "--lock-jitter",
+        type=int,
+        default=24,
+        help="Number of hours to add random jitter to the lock duration",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["spotify", "lastfm", "musicbrainz", "tidal", "discogs"],
+        default="spotify",
+        help="Popularity provider to use for updates",
+    )
+    parser.add_argument(
+        "--unrated-only",
+        action="store_true",
+        help="Only update songs that do not already have a Navidrome rating",
+    )
+    parser.add_argument("--discogs-inherit-album-rating", action="store_true",
+        help="Explicitly allow Discogs release ratings to be written to matching tracks")
+    parser.add_argument("--discogs-min-votes", type=int, default=5,
+        help="Minimum Discogs release rating votes (default: 5)")
+    parser.add_argument("--discogs-release", action="append", default=[], metavar="ALBUM_ID=RELEASE_ID",
+        help="Use a specific Discogs edition for a Navidrome album (repeatable)")
+    parser.add_argument(
+        "--navidrome-retries",
+        type=int,
+        default=3,
+        help="Number of attempts for Navidrome API requests",
+    )
+    parser.add_argument(
+        "--navidrome-timeout",
+        type=int,
+        default=10,
+        help="Base timeout in seconds for Navidrome API requests; each retry increases it",
+    )
 
-if ARTIST_IDs:
-    for ARTIST_ID in ARTIST_IDs:
-        url = f"{NAV_BASE_URL}/rest/getArtist?id={ARTIST_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
-        data = fetch_data(url)
-        ARTIST_NAME = data["artist"]["name"]
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
 
-        logging.info("")
-        logging.info(f"Artist: {LIGHT_PURPLE}{ARTIST_NAME}{RESET} ({ARTIST_ID})")
-        process_artist(ARTIST_ID)
 
-elif ALBUM_IDs:
-    for ALBUM_ID in ALBUM_IDs:
-        url = f"{NAV_BASE_URL}/rest/getAlbum?id={ALBUM_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
-        data = fetch_data(url)
-        ARTIST_NAME = data["album"]["artist"]
-        ARTIST_ID = data["album"]["artistId"]
-        ALBUM_NAME = data["album"]["name"]
+    parser.add_argument("--env-file", type=Path, default=Path(".env"),
+        help="Environment file (default: .env in the working directory)")
+    parser.add_argument("--log-dir", type=Path, default=Path("logs"),
+        help="Log and update-lock directory (default: logs)")
+    args = parser.parse_args(argv)
 
-        logging.info("")
-        logging.info(f"Artist: {LIGHT_PURPLE}{ARTIST_NAME}{RESET} ({ARTIST_ID})")
-        logging.info(f"  Album: {LIGHT_YELLOW}{ALBUM_NAME}{RESET} ({ALBUM_ID})")
-        process_album(ALBUM_ID)
+    PROVIDER = args.provider
+    DISCOGS_RELEASE_OVERRIDES = {}
+    if args.discogs_min_votes < 1:
+        parser.error("--discogs-min-votes must be positive")
+    if PROVIDER != "discogs" and (args.discogs_inherit_album_rating or args.discogs_release or args.discogs_min_votes != 5):
+        parser.error("Discogs options require --provider discogs")
+    for override in args.discogs_release:
+        try:
+            album_id, release_id = override.split("=", 1)
+            album_id = album_id.strip()
+            if not album_id or album_id in DISCOGS_RELEASE_OVERRIDES:
+                raise ValueError()
+            DISCOGS_RELEASE_OVERRIDES[album_id] = positive_id(release_id.strip())
+        except ValueError:
+            parser.error("--discogs-release requires a unique ALBUM_ID=positive RELEASE_ID")
+    if PROVIDER == "discogs" and not args.preview and not args.discogs_inherit_album_rating:
+        parser.error("Discogs supplies release ratings. Use --preview, or explicitly enable --discogs-inherit-album-rating to apply them to tracks.")
+    args.discogs_release_overrides = DISCOGS_RELEASE_OVERRIDES
+    return args
 
-else:
-    url = f"{NAV_BASE_URL}/rest/getArtists?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
-    data = fetch_data(url)
-    ARTIST_DATA = [
-        (artist["id"], artist["name"])
-        for index_entry in data["artists"]["index"]
-        for artist in index_entry["artist"]
-    ]
 
-    if START == 0 and LIMIT == 0:
-        data_slice = ARTIST_DATA
-        total_count = len(ARTIST_DATA)
-    else:
-        if LIMIT == 0:
-            data_slice = ARTIST_DATA[START:]
-        else:
-            data_slice = ARTIST_DATA[START : START + LIMIT]
-        total_count = len(data_slice)
+def run(options, tracks=None):
+    """Run one sync with validated options; reset counters, clients, and locks each time."""
+    global BASE_LOCK_DURATION, DISCOGS_RELEASE_OVERRIDES, FOUND_AND_UPDATED, HEX_ENCODED_PASS, LASTFM_API_KEY, LASTFM_API_URL
+    global LASTFM_ARTIST_TOP_TRACKS, LIGHT_BLUE, LIGHT_CYAN, LIGHT_GREEN, LIGHT_RED, LIGHT_YELLOW
+    global LOCK, LOCK_FILE, LOCK_JITTER, MUSICBRAINZ_API_URL, MUSICBRAINZ_LAST_REQUEST_AT, NAVIDROME_RETRIES
+    global NAVIDROME_TIMEOUT, NAV_BASE_URL, NAV_PASS, NAV_USER, NOT_FOUND, PREVIEW
+    global PROVIDER, RESET, SHOULD_DELAY, SKIPPED_RATED, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET
+    global SPOTIFY_TOKEN, TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET, TOTAL_TRACKS, UNMATCHED_TRACKS, UNRATED_ONLY
+    global args, artist, data, discogs_client, file_handler, index
+    global spotify_token_manager, tidal_client, url
+    global PROVENANCE_FILE, TRACK_IDENTITIES, AUTOMATION_TRACKS
+    args = options
+    PROVENANCE_FILE = getattr(args, "provenance_file", args.log_dir / "generated-ratings.json")
+    AUTOMATION_TRACKS = {str(track["id"]): track for track in (tracks or [])}
+    TRACK_IDENTITIES = {str(track["id"]): track.get("recording", "") for track in (tracks or [])}
+    if os.path.exists(".env"):
+        load_dotenv()
+    start_time = time.time()
+    LOCK_DIR = os.fspath(args.log_dir)
+    LOCK_FILENAME = "song_update_lock.json"
+    LOCK_FILE = LOCK_DIR + "/" + LOCK_FILENAME
+    NAV_BASE_URL = os.getenv("NAV_BASE_URL")
+    NAV_USER = os.getenv("NAV_USER")
+    NAV_PASS = os.getenv("NAV_PASS")
+    SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+    SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+    LASTFM_API_KEY = os.getenv("LASTFM_API_KEY")
+    TIDAL_CLIENT_ID = os.getenv("TIDAL_CLIENT_ID")
+    TIDAL_CLIENT_SECRET = os.getenv("TIDAL_CLIENT_SECRET")
+    TIDAL_COUNTRY_CODE = os.getenv("TIDAL_COUNTRY_CODE", "US").upper()
+    DISCOGS_TOKEN = os.getenv("DISCOGS_TOKEN", "")
+    discogs_client = None
+    tidal_client = None
+    LASTFM_API_URL = "https://ws.audioscrobbler.com/2.0/"
+    LASTFM_ARTIST_TOP_TRACKS = {}
+    MUSICBRAINZ_API_URL = "https://musicbrainz.org/ws/2/"
+    MUSICBRAINZ_LAST_REQUEST_AT = 0
+    LIGHT_PURPLE = Fore.MAGENTA + Style.BRIGHT
+    LIGHT_GREEN = Fore.GREEN + Style.BRIGHT
+    LIGHT_RED = Fore.RED + Style.BRIGHT
+    LIGHT_BLUE = Fore.BLUE + Style.BRIGHT
+    LIGHT_CYAN = Fore.CYAN + Style.BRIGHT
+    LIGHT_YELLOW = Fore.YELLOW + Style.BRIGHT
+    BOLD = Style.BRIGHT
+    RESET = Style.RESET_ALL
+    LOG_DIR = LOCK_DIR
+    if not os.path.exists(LOG_DIR):
+        os.makedirs(LOG_DIR, exist_ok=True)
+    LOGFILE = os.path.join(LOG_DIR, f"sonicratings_{int(time.time())}.log")
+    HEX_ENCODED_PASS = None
+    TOKEN_URL = "https://accounts.spotify.com/api/token"
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(SafeAsciiFormatter("%(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[console_handler])
+    file_handler = logging.FileHandler(LOGFILE, "a", encoding="ascii", errors="backslashreplace")
+    file_handler.setFormatter(SafeAsciiFormatter("[%(asctime)s] %(message)s"))
+    logging.getLogger().addHandler(file_handler)
+    spotify_token_manager = None
+    SPOTIFY_TOKEN = None
+    init(autoreset=True)
+    PREVIEW = 0
+    START = 0
+    LIMIT = 0
+    ARTIST_IDs = []
+    ALBUM_IDs = []
+    ARTISTS_PROCESSED = 0
+    TOTAL_TRACKS = 0
+    FOUND_AND_UPDATED = 0
+    NOT_FOUND = 0
+    SKIPPED_RATED = 0
+    UNMATCHED_TRACKS = []
+    ARTIST_IDs = args.artist or []
+    ALBUM_IDs = args.album or []
+    START = args.start
+    LIMIT = args.limit
+    BASE_LOCK_DURATION = args.lock_duration
+    LOCK_JITTER = args.lock_jitter
+    PROVIDER = args.provider
+    DISCOGS_RELEASE_OVERRIDES = args.discogs_release_overrides
+    UNRATED_ONLY = args.unrated_only
+    NAVIDROME_RETRIES = max(1, args.navidrome_retries)
+    NAVIDROME_TIMEOUT = max(1, args.navidrome_timeout)
+    validate_required_config(PROVIDER)
 
-    logging.info(f"Total artists to process: {LIGHT_GREEN}{total_count}{RESET}")
+    HEX_ENCODED_PASS = NAV_PASS.encode().hex()
 
-    for index, ARTIST_ENTRY in tqdm(
-        enumerate(data_slice), total=total_count, leave=False
-    ):
-        ARTIST_ID, ARTIST_NAME = ARTIST_ENTRY
-
-        logging.info("")
-        logging.info(
-            f"Artist: {LIGHT_PURPLE}{ARTIST_NAME}{RESET} ({ARTIST_ID})[{index+args.start}]"
+    if PROVIDER == "spotify":
+        spotify_token_manager = SpotifyTokenManager(
+            SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, TOKEN_URL
         )
-        process_artist(ARTIST_ID)
+        assert spotify_token_manager is not None
+        SPOTIFY_TOKEN = spotify_token_manager.get_token()
+    elif PROVIDER == "tidal":
+        if not re.fullmatch(r"[A-Z]{2}", TIDAL_COUNTRY_CODE):
+            logging.error("Config Error: TIDAL_COUNTRY_CODE must be a two-letter country code (e.g. US).")
+            sys.exit(1)
+        tidal_client = TidalClient(TIDAL_CLIENT_ID, TIDAL_CLIENT_SECRET, TIDAL_COUNTRY_CODE)
+    elif PROVIDER == "discogs":
+        discogs_client = DiscogsClient(DISCOGS_TOKEN, args.discogs_min_votes)
 
-        ARTISTS_PROCESSED += 1
+    logging.info(f"{BOLD}Version:{RESET} {LIGHT_YELLOW}SonicRatings v{__version__}{RESET}")
+
+    LOCK = load_lock()
+
+    SHOULD_DELAY = False
+
+    if args.preview:
+        logging.info(f"{LIGHT_YELLOW}Preview mode, no changes will be made.{RESET}")
+        PREVIEW = 1
+
+    if ARTIST_IDs and (START != 0 or LIMIT != 0):
+        START = 0
+        LIMIT = 0
+        logging.info(
+            f"{LIGHT_YELLOW}Warning: The --artist flag overrides --start and --limit. Ignoring these settings.{RESET}"
+        )
+
+    if not args.preview:
+        logging.info(
+            f"{BOLD}Syncing {PROVIDER.title()} {LIGHT_CYAN}popularity{RESET}{BOLD} with Navidrome {LIGHT_BLUE}rating{RESET}...{RESET}"
+        )
+
+    try:
+        validate_url(NAV_BASE_URL)
+    except ValueError as e:
+        logging.error(f"{LIGHT_RED}{type(e).__name__}{RESET}")
+        sys.exit(1)
+
+    if tracks is not None:
+        for track in tracks:
+            process_track(str(track["id"]), track["artist"], track["album"], track["title"],
+                discogs_album_artist=track.get("album_artist", track["artist"]),
+                discogs_release_id=track.get("discogs_release"))
+    elif ARTIST_IDs:
+        for ARTIST_ID in ARTIST_IDs:
+            url = f"{NAV_BASE_URL}/rest/getArtist?id={ARTIST_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
+            data = fetch_data(url)
+            ARTIST_NAME = data["artist"]["name"]
+
+            logging.info("")
+            logging.info(f"Artist: {LIGHT_PURPLE}{ARTIST_NAME}{RESET} ({ARTIST_ID})")
+            process_artist(ARTIST_ID)
+
+    elif ALBUM_IDs:
+        for ALBUM_ID in ALBUM_IDs:
+            url = f"{NAV_BASE_URL}/rest/getAlbum?id={ALBUM_ID}&u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
+            data = fetch_data(url)
+            ARTIST_NAME = data["album"]["artist"]
+            ARTIST_ID = data["album"]["artistId"]
+            ALBUM_NAME = data["album"]["name"]
+
+            logging.info("")
+            logging.info(f"Artist: {LIGHT_PURPLE}{ARTIST_NAME}{RESET} ({ARTIST_ID})")
+            logging.info(f"  Album: {LIGHT_YELLOW}{ALBUM_NAME}{RESET} ({ALBUM_ID})")
+            process_album(ALBUM_ID)
+
+    else:
+        url = f"{NAV_BASE_URL}/rest/getArtists?u={NAV_USER}&p=enc:{HEX_ENCODED_PASS}&v=1.12.0&c=sonicratings&f=json"
+        data = fetch_data(url)
+        ARTIST_DATA = [
+            (artist["id"], artist["name"])
+            for index_entry in data["artists"]["index"]
+            for artist in index_entry["artist"]
+        ]
+
+        if START == 0 and LIMIT == 0:
+            data_slice = ARTIST_DATA
+            total_count = len(ARTIST_DATA)
+        else:
+            if LIMIT == 0:
+                data_slice = ARTIST_DATA[START:]
+            else:
+                data_slice = ARTIST_DATA[START : START + LIMIT]
+            total_count = len(data_slice)
+
+        logging.info(f"Total artists to process: {LIGHT_GREEN}{total_count}{RESET}")
+
+        for index, ARTIST_ENTRY in tqdm(
+            enumerate(data_slice), total=total_count, leave=False
+        ):
+            ARTIST_ID, ARTIST_NAME = ARTIST_ENTRY
+
+            logging.info("")
+            logging.info(
+                f"Artist: {LIGHT_PURPLE}{ARTIST_NAME}{RESET} ({ARTIST_ID})[{index+args.start}]"
+            )
+            process_artist(ARTIST_ID)
+
+            ARTISTS_PROCESSED += 1
+
+    logging.info("")
+
+    processable_tracks = TOTAL_TRACKS - SKIPPED_RATED if UNRATED_ONLY else TOTAL_TRACKS
+
+    MATCH_PERCENTAGE = (FOUND_AND_UPDATED / processable_tracks) * 100 if processable_tracks != 0 else 0
+
+    FORMATTED_MATCH_PERCENTAGE = round(MATCH_PERCENTAGE, 2)  # Rounding to 2 decimal places
+
+    TOTAL_BLOCKS = 20
+
+    color_found = LIGHT_GREEN if FOUND_AND_UPDATED == processable_tracks else LIGHT_YELLOW
+
+    color_found_white = LIGHT_GREEN if FOUND_AND_UPDATED == processable_tracks else BOLD
+
+    color_not_found = LIGHT_GREEN if NOT_FOUND == 0 else LIGHT_RED
+
+    if processable_tracks == 0:
+        blocks_found = ""
+        blocks_not_found = ""
+    else:
+        blocks_found = "#" * round(FOUND_AND_UPDATED * TOTAL_BLOCKS / processable_tracks)
+        blocks_not_found = "-" * (TOTAL_BLOCKS - len(blocks_found))
+
+    full_blocks_found = f"{color_found_white}{blocks_found}{RESET}"
+
+    full_blocks_not_found = f"{color_not_found}{blocks_not_found}{RESET}"
+
+    elapsed_time = time.time() - start_time
+
+    hours, remainder = divmod(elapsed_time, 3600)
+
+    minutes, seconds = divmod(remainder, 60)
+
+    parts = []
+
+    if hours:
+        parts.append(f"{int(hours)}h")
+
+    if minutes:
+        parts.append(f"{int(minutes)}m")
+
+    if seconds or not parts:  # Show seconds if it's the only value, even if it's 0
+        parts.append(f"{int(seconds)}s")
+
+    formatted_elapsed_time = " ".join(parts)
+
+    summary_line = (
+        f"Tracks: {LIGHT_PURPLE}{TOTAL_TRACKS}{RESET} | "
+        f"Found: {color_found}{FOUND_AND_UPDATED}{RESET}"
+    )
+
+    if SKIPPED_RATED:
+        summary_line += f" | Skipped: {LIGHT_YELLOW}{SKIPPED_RATED}{RESET}"
+
+    summary_line += (
+        f" | Not Found: {color_not_found}{NOT_FOUND}{RESET} | "
+        f"Match: {color_found}{FORMATTED_MATCH_PERCENTAGE}%{RESET} | "
+        f"Time: {LIGHT_PURPLE}{formatted_elapsed_time}{RESET}"
+    )
+
+    logging.info(summary_line)
+    return 0
 
 
-# Display the results
-logging.info("")
-processable_tracks = TOTAL_TRACKS - SKIPPED_RATED if UNRATED_ONLY else TOTAL_TRACKS
-MATCH_PERCENTAGE = (FOUND_AND_UPDATED / processable_tracks) * 100 if processable_tracks != 0 else 0
-FORMATTED_MATCH_PERCENTAGE = round(MATCH_PERCENTAGE, 2)  # Rounding to 2 decimal places
-TOTAL_BLOCKS = 20
+def execute(options, tracks=None):
+    """Execute an explicit sync and release its log file."""
+    try:
+        return run(options, tracks)
+    finally:
+        # Release the run's log file even when a provider or server fails.
+        handler = globals().get("file_handler")
+        if handler is not None:
+            logging.getLogger().removeHandler(handler)
+            handler.close()
 
-color_found = LIGHT_GREEN if FOUND_AND_UPDATED == processable_tracks else LIGHT_YELLOW
-color_found_white = LIGHT_GREEN if FOUND_AND_UPDATED == processable_tracks else BOLD
-color_not_found = LIGHT_GREEN if NOT_FOUND == 0 else LIGHT_RED
 
-if processable_tracks == 0:
-    blocks_found = ""
-    blocks_not_found = ""
-else:
-    blocks_found = "#" * round(FOUND_AND_UPDATED * TOTAL_BLOCKS / processable_tracks)
-    blocks_not_found = "-" * (TOTAL_BLOCKS - len(blocks_found))
-full_blocks_found = f"{color_found_white}{blocks_found}{RESET}"
-full_blocks_not_found = f"{color_not_found}{blocks_not_found}{RESET}"
+def main(argv=None):
+    """Installed command and module entry point."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] in {"enqueue", "work", "library"}:
+        from .automation import main as automation_main
+        return automation_main(arguments)
+    return execute(parse_args(arguments))
 
-# Calculate elapsed time
-elapsed_time = time.time() - start_time
-hours, remainder = divmod(elapsed_time, 3600)
-minutes, seconds = divmod(remainder, 60)
 
-parts = []
-if hours:
-    parts.append(f"{int(hours)}h")
-if minutes:
-    parts.append(f"{int(minutes)}m")
-if seconds or not parts:  # Show seconds if it's the only value, even if it's 0
-    parts.append(f"{int(seconds)}s")
-
-formatted_elapsed_time = " ".join(parts)
-
-# logging.info(f"Processing completed in {int(hours):02}:{int(minutes):02}:{int(seconds):02}")
-summary_line = (
-    f"Tracks: {LIGHT_PURPLE}{TOTAL_TRACKS}{RESET} | "
-    f"Found: {color_found}{FOUND_AND_UPDATED}{RESET}"
-)
-if SKIPPED_RATED:
-    summary_line += f" | Skipped: {LIGHT_YELLOW}{SKIPPED_RATED}{RESET}"
-summary_line += (
-    f" | Not Found: {color_not_found}{NOT_FOUND}{RESET} | "
-    f"Match: {color_found}{FORMATTED_MATCH_PERCENTAGE}%{RESET} | "
-    f"Time: {LIGHT_PURPLE}{formatted_elapsed_time}{RESET}"
-)
-logging.info(summary_line)
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,7 +1,11 @@
 """Small CLI around the same scoring API available to a future GUI."""
 import argparse
 import json
-from .ratings import score_lastfm
+from .cli import get_lastfm_popularity, get_lastfm_rating
+
+
+def score_lastfm(listeners, plays, rank):
+    return get_lastfm_rating(get_lastfm_popularity(listeners, plays, rank), rank, listeners)
 
 
 def main():
@@ -14,3 +18,7 @@ def main():
         parser.error("Counts must be nonnegative and rank must be positive")
     print(json.dumps({"rating": score_lastfm(args.listeners, args.plays, args.rank), "source": "lastfm"}))
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

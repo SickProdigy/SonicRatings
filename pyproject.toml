@@ -3,15 +3,16 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sonicratings-engine"
-version = "0.1.0"
-description = "SonicRatings rating engine for automation and user interfaces"
-requires-python = ">=3.9"
-dependencies = ["requests>=2.31"]
+name = "sonicratings"
+version = "1.4.0"
+description = "Sync provider ratings to Navidrome and Subsonic libraries"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31", "python-dotenv>=1.0", "colorama>=0.4.6", "tqdm>=4.66.1", "mutagen>=1.47"]
 license = {file = "LICENSE"}
 
 [project.scripts]
-sonicratings-score = "sonicratings_engine.cli:main"
+sonicratings = "sonicratings.cli:main"
+sonicratings-score = "sonicratings.score:main"
 
 [tool.setuptools.packages.find]
-include = ["sonicratings_engine*"]
+include = ["sonicratings*"]

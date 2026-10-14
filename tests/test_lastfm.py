@@ -5,16 +5,16 @@ from pathlib import Path
 import re
 import unittest
 from unittest.mock import Mock
-from lastfm_matching import lookup_variants, matches_track, normalize_title
+from sonicratings.lastfm_matching import lookup_variants, matches_track, normalize_title
 
 
 def load_functions(context):
-    # Importing the CLI starts a real sync; load only the definitions under test.
-    tree = ast.parse(Path("sonicratings.py").read_text(encoding="utf-8"))
-    names = {"get_rating_from_popularity", "get_lastfm_rating", "process_track", "process_album"}
+    # Load isolated definitions with the fake runtime context used by these regressions.
+    tree = ast.parse(Path("sonicratings/cli.py").read_text(encoding="utf-8"))
+    names = {"get_rating_from_popularity", "get_lastfm_popularity", "get_lastfm_rating", "process_track", "process_album"}
     context.update(lookup_variants=lookup_variants, matches_track=matches_track, normalize_title=normalize_title)
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), "sonicratings.py", "exec"), context)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "sonicratings/cli.py", "exec"), context)
 
 
 class LastfmTests(unittest.TestCase):

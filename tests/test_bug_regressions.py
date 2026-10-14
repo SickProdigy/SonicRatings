@@ -13,10 +13,10 @@ from test_lastfm import load_functions
 
 def definitions(names, context):
     # The standalone CLI starts a sync on import; execute only its definitions.
-    tree = ast.parse(Path("sonicratings.py").read_text(encoding="utf-8"))
+    tree = ast.parse(Path("sonicratings/cli.py").read_text(encoding="utf-8"))
     nodes = [node for node in tree.body
              if isinstance(node, ast.FunctionDef) and node.name in names]
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), "sonicratings.py", "exec"), context)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "sonicratings/cli.py", "exec"), context)
 
 
 class BugRegressionTests(unittest.TestCase):
