@@ -86,6 +86,29 @@ class AutomationTests(unittest.TestCase):
         scans = self.server.scans
         self.assertEqual(self.run_worker(now=1001), 0)
         self.assertEqual(self.server.scans, scans)
+
+    def test_ordered_provider_chain_stops_after_first_rating(self):
+        calls = []
+        options = [SimpleNamespace(preview=False, provider="musicbrainz"),
+                   SimpleNamespace(preview=False, provider="lastfm")]
+        def rate_first(option, tracks):
+            calls.append(option.provider)
+            self.server.data[tracks[0]["id"]]["userRating"] = 4
+        self.assertEqual(worker.work(self.root, self.server, options, rate_first, 1000), 0)
+        self.assertEqual(calls, ["musicbrainz"])
+        self.assertFalse(self.path.exists())
+
+    def test_ordered_provider_chain_tries_next_for_unrated_track(self):
+        calls = []
+        options = [SimpleNamespace(preview=False, provider="musicbrainz"),
+                   SimpleNamespace(preview=False, provider="lastfm")]
+        def fallback(option, tracks):
+            calls.append(option.provider)
+            if option.provider == "lastfm":
+                self.server.data[tracks[0]["id"]]["userRating"] = 3
+        self.assertEqual(worker.work(self.root, self.server, options, fallback, 1000), 0)
+        self.assertEqual(calls, ["musicbrainz", "lastfm"])
+        self.assertFalse(self.path.exists())
     def test_failed_run_retains_job_and_retries(self):
         def fail(*args): raise RuntimeError("provider failed")
         self.assertEqual(self.run_worker(runner=fail), 1)

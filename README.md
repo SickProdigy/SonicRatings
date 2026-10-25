@@ -471,6 +471,12 @@ sonicratings work --state-dir logs/import-queue --provider lastfm --preview
 sonicratings work --state-dir logs/import-queue --provider lastfm
 ```
 
+For queued imports, providers can be tried in order. Only tracks left unrated by one provider are sent to the next:
+
+```bash
+sonicratings work --state-dir logs/import-queue --provider musicbrainz,lastfm
+```
+
 Configure `LIDARR_URL` and `LIDARR_API_KEY` for enqueue, plus `SUBSONIC_URL`, `SUBSONIC_USERNAME`, and `SUBSONIC_PASSWORD` (or the existing `NAV_BASE_URL`, `NAV_USER`, and `NAV_PASS`). Queue commands load `.env`; `--env-file PATH` selects another file. `work` and `library` preserve existing personal ratings. Queue state, logs, locks, and `generated-ratings.json` are scoped by server URL and username beneath `--state-dir`.
 
 For a whole-library backfill through the same adapter:
@@ -487,6 +493,6 @@ Successful writes and pending write intents retain their source in `generated-ra
 
 SonicRatings writes ratings to Navidrome/Subsonic. musicbrainz-helper independently contributes ratings and genres to MusicBrainz. Neither tool imports or installs the other.
 
-Package and application version are **1.4.1**. `VERSION`, package metadata, and `sonicratings.__version__` agree. The old `engine-v0.1.0` release is superseded for future installation. Existing source-checkout users should reinstall with `python -m pip install -e .` and replace `python sonicratings.py` commands with `sonicratings` or `python -m sonicratings`.
+Package and application version are **1.5.0**. `VERSION`, package metadata, and `sonicratings.__version__` agree. The old `engine-v0.1.0` release is superseded for future installation. Existing source-checkout users should reinstall with `python -m pip install -e .` and replace `python sonicratings.py` commands with `sonicratings` or `python -m sonicratings`.
 
 Run checks with `python -B -m unittest discover -s tests`.

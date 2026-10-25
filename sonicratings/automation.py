@@ -192,6 +192,8 @@ def stars(song):
 
 
 def work(root, server, options, runner=cli.execute, now=None):
+    option_chain = list(options) if isinstance(options, (list, tuple)) else [options]
+    preview = any(item.preview for item in option_chain)
     now = time.time() if now is None else now
     jobs = sorted((root / "jobs").glob("*.json"))
     due, failures = [], 0
@@ -242,12 +244,18 @@ def work(root, server, options, runner=cli.execute, now=None):
                             "recording": mbid(latest.get("musicBrainzId")) or track.get("recording", "")}
                 selected_tracks.append(selected)
                 resolved_tracks.append(track)
-            if selected_tracks:
-                runner(options, selected_tracks)
+            pending_tracks = selected_tracks
+            for provider_options in option_chain:
+                if not pending_tracks:
+                    break
+                runner(provider_options, pending_tracks)
+                if not provider_options.preview:
+                    pending_tracks = [track for track in pending_tracks
+                                      if not stars(server.get_song(track["id"]))]
             for track, selected in zip(resolved_tracks, selected_tracks):
-                if options.preview or not stars(server.get_song(selected["id"])):
+                if preview or not stars(server.get_song(selected["id"])):
                     remaining.append(track)
-            if not options.preview:
+            if not preview:
                 if remaining:
                     logging.info("SonicRatings: %s tracks awaiting a verified import or usable rating; retry scheduled", len(remaining))
                     attempts = min(job.get("attempts", 0) + 1, 7)
@@ -258,7 +266,7 @@ def work(root, server, options, runner=cli.execute, now=None):
         except (Exception, SystemExit):
             logging.warning("SonicRatings job failed; retained for retry")
             failures += 1
-            if not options.preview:
+            if not preview:
                 attempts = min(job.get("attempts", 0) + 1, 7)
                 write_json(path, {**job, "attempts": attempts,
                                  "retry_after": now + min(3600, 60 * 2 ** (attempts - 1))})
@@ -270,11 +278,16 @@ def main(argv):
     parser.add_argument("command", choices=("enqueue", "work", "library"))
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--album-id", type=int)
-    parser.add_argument("--provider", choices=("spotify", "lastfm", "musicbrainz", "tidal", "discogs"), default="musicbrainz")
+    parser.add_argument("--provider", default="musicbrainz",
+                        help="Provider or ordered comma-separated fallback chain")
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--discogs-inherit-album-rating", action="store_true")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     args = parser.parse_args(argv)
+    supported = {"spotify", "lastfm", "musicbrainz", "tidal", "discogs"}
+    providers = list(dict.fromkeys(item.strip().lower() for item in args.provider.split(",") if item.strip()))
+    if not providers or any(item not in supported for item in providers):
+        parser.error("--provider must contain spotify, lastfm, musicbrainz, tidal, or discogs")
     if args.env_file.is_file():
         load_dotenv(args.env_file)
     url, username, password = settings()
@@ -290,23 +303,29 @@ def main(argv):
         server = Subsonic(url, username, password)
         # All automatic writes preserve personal ratings, regardless of provider.
         os.environ.update(NAV_BASE_URL=url, NAV_USER=username, NAV_PASS=password)
-        flags = ["--provider", args.provider, "--unrated-only", "--log-dir", str(root), "--env-file", str(args.env_file)]
-        if args.preview:
-            flags.append("--preview")
-        if args.discogs_inherit_album_rating:
-            flags.append("--discogs-inherit-album-rating")
-        options = cli.parse_args(flags)
-        options.provenance_file = root / "generated-ratings.json"
+        option_chain = []
+        for provider in providers:
+            flags = ["--provider", provider, "--unrated-only", "--log-dir", str(root), "--env-file", str(args.env_file)]
+            if args.preview:
+                flags.append("--preview")
+            if provider == "discogs" and args.discogs_inherit_album_rating:
+                flags.append("--discogs-inherit-album-rating")
+            options = cli.parse_args(flags)
+            options.provenance_file = root / "generated-ratings.json"
+            option_chain.append(options)
         request_gate = os.getenv("MUSICBRAINZ_REQUEST_LOCK_DIR")
-        gate = worker_lock(Path(request_gate)) if args.provider == "musicbrainz" and request_gate else nullcontext()
+        gate = worker_lock(Path(request_gate)) if "musicbrainz" in providers and request_gate else nullcontext()
         with worker_lock(root), gate:
             if args.command == "library":
                 tracks = [{"id": str(song["id"]), "artist": song.get("artist", ""),
                            "title": song.get("title", ""), "album": song.get("album", ""),
                            "album_artist": song.get("albumArtist", song.get("artist", "")),
                            "recording": mbid(song.get("musicBrainzId")), "path": song.get("path", "")} for song in server.songs().values()]
-                return cli.execute(options, tracks)
-            return 1 if work(root, server, options) else 0
+                status = 0
+                for options in option_chain:
+                    status = cli.execute(options, tracks) or status
+                return status
+            return 1 if work(root, server, option_chain) else 0
     except (Exception, SystemExit):
         logging.error("SonicRatings automation failed; check configuration and server availability. Jobs retained.")
         return 1
