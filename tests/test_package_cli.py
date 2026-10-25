@@ -63,6 +63,22 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual(self.writes, [])
         self.assertFalse(Path("logs/song_update_lock.json").exists())
         self.assertEqual(cli.TOTAL_TRACKS, 1)
+        self.assertEqual(cli.MATCHED_TRACKS, 1)
+        self.assertEqual(cli.USABLE_RATINGS, 1)
+        self.assertEqual(cli.FOUND_AND_UPDATED, 0)
+
+    def test_zero_rating_is_matched_but_not_usable_or_updated(self):
+        self.provider.find_track.return_value = {
+            "average": 2.0, "rating": 0, "matched_title": "Song",
+            "release_id": 10, "selection": "exact", "votes": 20,
+        }
+        self.assertEqual(self.sync("--album", "album", "--discogs-inherit-album-rating"), 0)
+        self.assertEqual(cli.MATCHED_TRACKS, 1)
+        self.assertEqual(cli.USABLE_RATINGS, 0)
+        self.assertEqual(cli.NO_USABLE_RATING, 1)
+        self.assertEqual(cli.FOUND_AND_UPDATED, 0)
+        self.assertEqual(cli.NOT_FOUND, 0)
+        self.assertEqual(self.writes, [])
 
     def test_album_sync_writes_rating_and_preserves_existing_lock_history(self):
         directory = Path("runtime")

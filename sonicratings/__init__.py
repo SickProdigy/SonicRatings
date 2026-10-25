@@ -1,2 +1,2 @@
 """SonicRatings: provider ratings synced to Navidrome/Subsonic."""
-__version__ = "1.4.0"
+__version__ = "1.4.1"

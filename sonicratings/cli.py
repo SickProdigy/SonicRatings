@@ -338,7 +338,8 @@ def get_existing_rating(track_id):
 def process_track(track_id, artist_name, album, track_name, discogs_album_artist=None, discogs_release_id=None):
 
     # Declare global variables
-    global FOUND_AND_UPDATED, UNMATCHED_TRACKS, NOT_FOUND, TOTAL_TRACKS, SKIPPED_RATED
+    global FOUND_AND_UPDATED, MATCHED_TRACKS, NO_USABLE_RATING, USABLE_RATINGS
+    global UNMATCHED_TRACKS, NOT_FOUND, TOTAL_TRACKS, SKIPPED_RATED
 
     # If the user asked for unrated-only, skip anything that already has a Navidrome score.
     existing_rating = get_existing_rating(track_id)
@@ -843,14 +844,17 @@ def process_track(track_id, artist_name, album, track_name, discogs_album_artist
     )
 
     if provider_value is not None:
+        MATCHED_TRACKS = globals().get("MATCHED_TRACKS", 0) + 1
         # MusicBrainz ratings are already 0-5, so use directly; others are 0-100 and need mapping.
         navidrome_rating = navidrome_rating if PROVIDER in ("musicbrainz", "lastfm", "discogs") else get_rating_from_popularity(provider_value)
         provider_value_str = f"{provider_value} " if 0 <= provider_value <= 9 else str(provider_value)
         source_label = "discogs-release" if PROVIDER == "discogs" else "s" if PROVIDER == "musicbrainz" else "p"
 
         if navidrome_rating == 0:
+            NO_USABLE_RATING = globals().get("NO_USABLE_RATING", 0) + 1
             logging.info(f"    {source_label}:{LIGHT_CYAN}{provider_value_str}{RESET} | Skipping {track_name} (Navidrome Rating: 0)")
         else:
+            USABLE_RATINGS = globals().get("USABLE_RATINGS", 0) + 1
             logging.info(f"    {source_label}:{LIGHT_CYAN}{provider_value_str}{RESET} -> r:{LIGHT_BLUE}{navidrome_rating}{RESET} | {LIGHT_GREEN}{track_name} - {sp_track_name}{RESET}")
 
         if navidrome_rating == 0:
@@ -1087,6 +1091,7 @@ def parse_args(argv=None):
 def run(options, tracks=None):
     """Run one sync with validated options; reset counters, clients, and locks each time."""
     global BASE_LOCK_DURATION, DISCOGS_RELEASE_OVERRIDES, FOUND_AND_UPDATED, HEX_ENCODED_PASS, LASTFM_API_KEY, LASTFM_API_URL
+    global MATCHED_TRACKS, NO_USABLE_RATING, USABLE_RATINGS
     global LASTFM_ARTIST_TOP_TRACKS, LIGHT_BLUE, LIGHT_CYAN, LIGHT_GREEN, LIGHT_RED, LIGHT_YELLOW
     global LOCK, LOCK_FILE, LOCK_JITTER, MUSICBRAINZ_API_URL, MUSICBRAINZ_LAST_REQUEST_AT, NAVIDROME_RETRIES
     global NAVIDROME_TIMEOUT, NAV_BASE_URL, NAV_PASS, NAV_USER, NOT_FOUND, PREVIEW
@@ -1152,6 +1157,9 @@ def run(options, tracks=None):
     ARTISTS_PROCESSED = 0
     TOTAL_TRACKS = 0
     FOUND_AND_UPDATED = 0
+    MATCHED_TRACKS = 0
+    USABLE_RATINGS = 0
+    NO_USABLE_RATING = 0
     NOT_FOUND = 0
     SKIPPED_RATED = 0
     UNMATCHED_TRACKS = []
@@ -1278,15 +1286,15 @@ def run(options, tracks=None):
 
     processable_tracks = TOTAL_TRACKS - SKIPPED_RATED if UNRATED_ONLY else TOTAL_TRACKS
 
-    MATCH_PERCENTAGE = (FOUND_AND_UPDATED / processable_tracks) * 100 if processable_tracks != 0 else 0
+    MATCH_PERCENTAGE = (MATCHED_TRACKS / processable_tracks) * 100 if processable_tracks != 0 else 0
 
     FORMATTED_MATCH_PERCENTAGE = round(MATCH_PERCENTAGE, 2)  # Rounding to 2 decimal places
 
     TOTAL_BLOCKS = 20
 
-    color_found = LIGHT_GREEN if FOUND_AND_UPDATED == processable_tracks else LIGHT_YELLOW
+    color_found = LIGHT_GREEN if MATCHED_TRACKS == processable_tracks else LIGHT_YELLOW
 
-    color_found_white = LIGHT_GREEN if FOUND_AND_UPDATED == processable_tracks else BOLD
+    color_found_white = LIGHT_GREEN if MATCHED_TRACKS == processable_tracks else BOLD
 
     color_not_found = LIGHT_GREEN if NOT_FOUND == 0 else LIGHT_RED
 
@@ -1294,7 +1302,7 @@ def run(options, tracks=None):
         blocks_found = ""
         blocks_not_found = ""
     else:
-        blocks_found = "#" * round(FOUND_AND_UPDATED * TOTAL_BLOCKS / processable_tracks)
+        blocks_found = "#" * round(MATCHED_TRACKS * TOTAL_BLOCKS / processable_tracks)
         blocks_not_found = "-" * (TOTAL_BLOCKS - len(blocks_found))
 
     full_blocks_found = f"{color_found_white}{blocks_found}{RESET}"
@@ -1322,7 +1330,10 @@ def run(options, tracks=None):
 
     summary_line = (
         f"Tracks: {LIGHT_PURPLE}{TOTAL_TRACKS}{RESET} | "
-        f"Found: {color_found}{FOUND_AND_UPDATED}{RESET}"
+        f"Matched: {color_found}{MATCHED_TRACKS}{RESET} | "
+        f"Usable: {LIGHT_GREEN}{USABLE_RATINGS}{RESET} | "
+        f"Updated: {LIGHT_BLUE}{FOUND_AND_UPDATED}{RESET} | "
+        f"No Usable Rating: {LIGHT_YELLOW}{NO_USABLE_RATING}{RESET}"
     )
 
     if SKIPPED_RATED:

@@ -487,6 +487,6 @@ Successful writes and pending write intents retain their source in `generated-ra
 
 SonicRatings writes ratings to Navidrome/Subsonic. musicbrainz-helper independently contributes ratings and genres to MusicBrainz. Neither tool imports or installs the other.
 
-Package and application version are **1.4.0**. `VERSION`, package metadata, and `sonicratings.__version__` agree. The old `engine-v0.1.0` release is superseded for future installation. Existing source-checkout users should reinstall with `python -m pip install -e .` and replace `python sonicratings.py` commands with `sonicratings` or `python -m sonicratings`.
+Package and application version are **1.4.1**. `VERSION`, package metadata, and `sonicratings.__version__` agree. The old `engine-v0.1.0` release is superseded for future installation. Existing source-checkout users should reinstall with `python -m pip install -e .` and replace `python sonicratings.py` commands with `sonicratings` or `python -m sonicratings`.
 
 Run checks with `python -B -m unittest discover -s tests`.

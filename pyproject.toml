@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sonicratings"
-version = "1.4.0"
+version = "1.4.1"
 description = "Sync provider ratings to Navidrome and Subsonic libraries"
 requires-python = ">=3.10"
 dependencies = ["requests>=2.31", "python-dotenv>=1.0", "colorama>=0.4.6", "tqdm>=4.66.1", "mutagen>=1.47"]
