@@ -403,6 +403,8 @@ Actual updates also write ratings and save locks, so they take longer. Metadata,
 
 The effectiveness of this script heavily relies on the accuracy of the artist, album, and track titles in your music library. For the supported providers to successfully recognize and match songs, these metadata details need to be precise.
 
+After a run, the summary lists each track the selected provider could not match, using its artist, album, and title. The same list is saved in the run log under `logs/`, so you can review the tags and retry after correcting them. Tracks that matched but had no usable rating are counted separately.
+
 I personally recommend using **MusicBrainz** to tag your music library. MusicBrainz is a comprehensive music database that provides reliable and standardized music metadata, which significantly enhances the accuracy of track matching with any of the supported providers.
 
 However, it's important to acknowledge that even with a perfectly tagged MusicBrainz library, discrepancies can still occur between Spotify and MusicBrainz data. This may result in the script missing some songs during the matching process.
@@ -493,6 +495,6 @@ Successful writes and pending write intents retain their source in `generated-ra
 
 SonicRatings writes ratings to Navidrome/Subsonic. musicbrainz-helper independently contributes ratings and genres to MusicBrainz. Neither tool imports or installs the other.
 
-Package and application version are **1.5.0**. `VERSION`, package metadata, and `sonicratings.__version__` agree. The old `engine-v0.1.0` release is superseded for future installation. Existing source-checkout users should reinstall with `python -m pip install -e .` and replace `python sonicratings.py` commands with `sonicratings` or `python -m sonicratings`.
+Package and application version are **1.5.1**. `VERSION`, package metadata, and `sonicratings.__version__` agree. The old `engine-v0.1.0` release is superseded for future installation. Existing source-checkout users should reinstall with `python -m pip install -e .` and replace `python sonicratings.py` commands with `sonicratings` or `python -m sonicratings`.
 
 Run checks with `python -B -m unittest discover -s tests`.

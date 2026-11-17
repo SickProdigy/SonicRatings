@@ -1346,6 +1346,10 @@ def run(options, tracks=None):
     )
 
     logging.info(summary_line)
+    if UNMATCHED_TRACKS:
+        logging.info("Unmatched tracks (%s) for %s:", len(UNMATCHED_TRACKS), PROVIDER)
+        for track in UNMATCHED_TRACKS:
+            logging.info("  %s", track)
     return 0
 
 
